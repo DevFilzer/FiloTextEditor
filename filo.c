@@ -1,5 +1,4 @@
 /*** includes ***/
-
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -17,7 +16,12 @@ enum editorKey {
     ARROW_LEFT = 1000,
     ARROW_RIGHT,
     ARROW_UP,
-    ARROW_DOWN
+    ARROW_DOWN,
+    DEL_KEY,
+    HOME_KEY,
+    END_KEY,
+    PAGE_UP,
+    PAGE_DOWN
 };
 
 /*** data ***/
@@ -31,8 +35,7 @@ struct editorConfig
 struct editorConfig E;
 
 /*** terminal ***/
-void die(const char *s)
-{
+void die(const char *s) {
     write(STDOUT_FILENO, "\x1b[2J", 4);
     write(STDOUT_FILENO, "\x1b[H", 3);
     
@@ -40,13 +43,11 @@ void die(const char *s)
     exit(1);
 }
 
-void disableRawMode(void)
-{
+void disableRawMode(void) {
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios) == -1) die("tcgetattr");
 }
  
-void enableRawMode(void)
-{
+void enableRawMode(void) {
     if (tcgetattr(STDIN_FILENO, &E.orig_termios) == -1) die("tcgetattr");
 
     atexit(disableRawMode);
@@ -64,8 +65,7 @@ void enableRawMode(void)
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcgetattr");
 }
 
-int editorReadKey(void)
-{
+int editorReadKey(void) {
     int nread;
     char c;
     while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
@@ -79,13 +79,34 @@ int editorReadKey(void)
         if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
         
         if (seq[0] == '[') {
+            if (seq[1] >= '0' && seq[1] <= '9') {
+                if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
+                if (seq[2] == '~') {
+                    switch (seq[1]) {
+                        case '1' : return HOME_KEY;
+                        case '3' : return DEL_KEY;                        case '4' : return END_KEY;
+                        case '5' : return PAGE_UP;
+                        case '6' : return PAGE_DOWN;
+                        case '7' : return HOME_KEY;
+                        case '8' : return END_KEY;
+                    }
+                }
+        } else {
             switch (seq[1]) {
-                case 'A' : return 'ARROW_UP';
-                case 'B' : return 'ARROW_DOWN';
-                case 'C' : return 'ARROW_RIGHT';
-                case 'D' : return 'ARROW_LEFT';
+            case 'A': return ARROW_UP;
+            case 'B': return ARROW_DOWN;
+            case 'C': return ARROW_RIGHT;
+            case 'D': return ARROW_LEFT;
+            case 'H' : return HOME_KEY;
+            case 'F' : return END_KEY;
             }
         }
+    } else if (seq[0] == 'O') {
+        switch (seq[1]) {
+            case 'H' : return HOME_KEY;
+            case 'F' : return END_KEY;
+        }
+    }
 
         return '\x1b';
     }
@@ -94,8 +115,7 @@ int editorReadKey(void)
     }
 }
 
-int getCursorPosition(int *rows, int *cols)
-{
+int getCursorPosition(int *rows, int *cols) {
     char buf[32];
     unsigned int i = 0;
     
@@ -116,8 +136,7 @@ int getCursorPosition(int *rows, int *cols)
     return -1;
 }
 
-int getWindowSize(int *rows, int *cols)
-{
+int getWindowSize(int *rows, int *cols) {
     struct winsize ws;
 
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0)
@@ -203,23 +222,30 @@ void editorRefreshScreen(void) {
 /*** input ***/
 void editorMoveCursor(int key) {
     switch (key) {
-        case 'ARROW_LEFT':
-            E.cx--;
+        case ARROW_LEFT:
+            if (E.cx != 0) {
+                E.cx--;
+                }
             break;
-        case 'ARROW_RIGHT':
-            E.cx++;
+        case ARROW_RIGHT:
+            if (E.cx != E.screencols - 1) {
+                E.cx++;
+            }
             break;
-        case 'ARROW_UP':
-            E.cy--;
+         case ARROW_UP:
+            if (E.cy != 0) {
+                E.cy--;
+                }
             break;
-        case 'ARROW_DOWN':
-            E.cy++;
+        case ARROW_DOWN:
+            if (E.cy != E.screencols - 1) {
+                E.cy++;
+            }
             break;
     }
 }
 
-void editorProcessKeypress(void)
-{
+void editorProcessKeypress(void) {
     int c = editorReadKey();
 
     switch (c)
@@ -230,10 +256,26 @@ void editorProcessKeypress(void)
         exit(0);
         break;
 
-        case 'ARROW_UP':
-        case 'ARROW_DOWN':
-        case 'ARROW_LEFT':
-        case 'ARROW_RIGHT':
+        case HOME_KEY:
+            E.cx = 0;
+            break;
+        case END_KEY:
+            E.cx = E.screencols - 1;
+            break;
+
+        case PAGE_UP:
+        case PAGE_DOWN:
+        {
+            int times = E.screenrows;
+            while (times--)
+                editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+        }
+        break;
+
+        case ARROW_UP:
+        case ARROW_DOWN:
+        case ARROW_LEFT:
+        case ARROW_RIGHT:
             editorMoveCursor(c);
             break;
     }
@@ -241,16 +283,14 @@ void editorProcessKeypress(void)
 }
 
 /*** init ***/
-void initEditor(void)
-{
+void initEditor(void) {
     E.cx = 0;
     E.cy = 0;
 
     if (getWindowSize(&E.screenrows, &E.screencols) == -1) die ("getWindowSize");
 }
 
-int main(void)
-{
+int main(void) {
     enableRawMode();
     initEditor();
 
