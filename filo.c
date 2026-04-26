@@ -329,6 +329,7 @@ void editorDelChar() {
     else {
         E.cx = E.row[E.cy - 1].size;
         editorRowAppendString(&E.row[E.cy - 1], row->chars, row->size);
+        editorDelRow(E.cy); //Fix the Phantom lines bug
         E.cy--;
     }
 }
