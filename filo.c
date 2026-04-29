@@ -1,30 +1,47 @@
 /*** includes ***/
 #define  _DEFAULT_SOURCE
-#define _BSD_SOURCE
+#define _BSD_SOURCE // change in case of conflict
 #define _GNU_SOURCE
 
-#include <ctype.h>
+#include <ctype.h>  
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
+#include <sys/time.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
 /*** defines ***/
-#define FILO_VERSION "0.0.1"
+#define FILO_VERSION "1.0.1"
 #define FILO_TAB_STOP 8
 #define FILO_QUIT_TIMES 3
 
 #define CTRL_KEY(k) ((k) & 0x1f)
 
 enum editorKey {
+    KELL_NULL = 0,
+    CTRL_C = 3,
+    CTRL_D = 4,
+    CTRL_F = 6,
+    CTRL_H = 8,
+    TAB = 9,
+    CTRL_L = 12,
+    ENTER = 13,
+    CTRL_Q = 17,
+    CTRL_S = 19,
+    CTRL_U = 21,
+    ESC = 27,
     BACKSPACE = 127,
+
+    // Non-comadding keys
     ARROW_LEFT = 1000,
     ARROW_RIGHT,
     ARROW_UP,
@@ -36,28 +53,26 @@ enum editorKey {
     PAGE_DOWN
 };
 
-enum editorHighlight {
-    HL_NORMAL = 0,
-    HL_COMMENT,
-    HL_MLCOMMENT,
-    HL_KEYWORD1,
-    HL_KEYWORD2,
-    HL_STRING,
-    HL_NUMBER,
-    HL_MATCH
-};
+#define HL_NORMAL 0
+#define HL_NONPRINT 1
+#define HL_COMMENT 2 
+#define HL_MLCOMMENT 3
+#define HL_KEYWORD1 4
+#define HL_KEYWORD2 5
+#define HL_STRING 6
+#define HL_NUMBER 7
+#define HL_MATCH 8
 
-#define HL_HIGHLIGHT_NUMBERS (1<<0)
-#define HL_HIGHLIGHT_STRINGS (1<<1)
+#define HL_HIGHLIGHT_NUMBERS (1 << 0)
+#define HL_HIGHLIGHT_STRINGS (1 << 1)
 
 /*** data ***/
 struct editorSyntax {
-    char *filetype;
     char **filematch;
     char **keywords;
-    char *singleline_comment_start;
-    char *multiline_comment_start;
-    char *multiline_comment_end;
+    char *singleline_comment_start[5]; // 4 chars + null -> cover most languages
+    char *multiline_comment_start[5];
+    char *multiline_comment_end[5];
     int flags;
 };
 
@@ -71,50 +86,609 @@ typedef struct erow {
     int hl_open_comment;
 } erow;
 
+typedef struct highlight_color {
+    int r, g, b;
+} highlight_color;
+
 struct editorConfig 
 {
-    int cx, cy;
-    int rx;
+    int cx, cy; // cursor x and y in chars
     int rowoff;
     int coloff;
     int screenrows;
     int screencols;
     int numrows;
+    int rawmode; // is raw mode on? in the terminal
     erow *row;
     int dirty;
+    int paste_mode; // disables autocomplete
+    int last_key; // last key pressed by user
     char *filename;
     char statusmsg[80];
     time_t statusmsg_time;
     struct editorSyntax *syntax;
-    struct termios orig_termios;
+    struct timeval last_char_time; // time of last char for paste detection
 };
 
 struct editorConfig E;
 
+void editorSetStatusMessage(const char *fmt, ...);
+
 /*** filetypes ***/
-char *C_HL_extensions[] = { ".c", ".h", ".cpp", NULL };
+char *C_HL_extensions[] = {".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".c++", ".hxx", ".h++", NULL};
 char *C_HL_keywords[] = {
-    "switch", "if", "while", "for", "break", "continue", "return", "else",
-  "struct", "union", "typedef", "static", "enum", "class", "case",
+    /* C Keywords */
+    "auto", "break", "case", "continue", "default", "do", "else", "enum",
+    "extern", "for", "goto", "if", "register", "return", "sizeof", "static",
+    "struct", "switch", "typedef", "union", "volatile", "while", "NULL",
 
-  "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
-  "void|", NULL
-};
+    /* C++ Keywords */
+    "alignas", "alignof", "and", "and_eq", "asm", "bitand", "bitor", "class",
+    "compl", "constexpr", "const_cast", "deltype", "delete", "dynamic_cast",
+    "explicit", "export", "false", "friend", "inline", "mutable", "namespace",
+    "new", "noexcept", "not", "not_eq", "nullptr", "operator", "or", "or_eq",
+    "private", "protected", "public", "reinterpret_cast", "static_assert",
+    "static_cast", "template", "this", "thread_local", "throw", "true", "try",
+    "typeid", "typename", "virtual", "xor", "xor_eq",
 
+    /* C types */
+    "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
+    "void|", "short|", "auto|", "const|", "bool|", NULL};
+
+/* Python */
+char *PYTHON_HL_extensions[] = {".py", ".pyw", ".pyi", ".pyx", NULL};
+char *PYTHON_HL_keywords[] = {
+    /* Python Keywords */
+    "and", "as", "assert", "break", "class", "continue", "def", "del",
+    "elif", "else", "except", "exec", "finally", "for", "from", "global",
+    "if", "import", "in", "is", "lambda", "not", "or", "pass", "print",
+    "raise", "return", "try", "while", "with", "yield", "async", "await",
+    "nonlocal", "True", "False", "None",
+
+    /* Python Built-ins */
+    "abs|", "all|", "any|", "bin|", "bool|", "bytearray|", "bytes|", "callable|",
+    "chr|", "classmethod|", "compile|", "complex|", "delattr|", "dict|", "dir|",
+    "divmod|", "enumerate|", "eval|", "exec|", "filter|", "float|", "format|",
+    "frozenset|", "getattr|", "globals|", "hasattr|", "hash|", "help|", "hex|",
+    "id|", "input|", "int|", "isinstance|", "issubclass|", "iter|", "len|",
+    "list|", "locals|", "map|", "max|", "memoryview|", "min|", "next|", "object|",
+    "oct|", "open|", "ord|", "pow|", "property|", "range|", "repr|", "reversed|",
+    "round|", "set|", "setattr|", "slice|", "sorted|", "staticmethod|", "str|",
+    "sum|", "super|", "tuple|", "type|", "vars|", "zip|", "self|", "cls|", NULL};
+
+/* Java */
+char *JAVA_HL_extensions[] = {".java", ".class", NULL};
+char *JAVA_HL_keywords[] = {
+    /* Java Keywords */
+    "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char",
+    "class", "const", "continue", "default", "do", "double", "else", "enum",
+    "extends", "final", "finally", "float", "for", "goto", "if", "implements",
+    "import", "instanceof", "int", "interface", "long", "native", "new", "package",
+    "private", "protected", "public", "return", "short", "static", "strictfp",
+    "super", "switch", "synchronized", "this", "throw", "throws", "transient",
+    "try", "void", "volatile", "while", "true", "false", "null",
+
+    /* Java Types and Common Classes */
+    "String|", "Object|", "Class|", "System|", "Thread|", "Runnable|",
+    "Exception|", "RuntimeException|", "ArrayList|", "HashMap|", "List|",
+    "Map|", "Set|", "Collection|", "Iterator|", "Comparable|", "Serializable|", NULL};
+
+/* JavaScript */
+char *JS_HL_extensions[] = {".js", ".jsx", ".mjs", ".cjs", NULL};
+char *JS_HL_keywords[] = {
+    /* JavaScript Keywords */
+    "break", "case", "catch", "class", "const", "continue", "debugger", "default",
+    "delete", "do", "else", "export", "extends", "finally", "for", "function",
+    "if", "import", "in", "instanceof", "let", "new", "return", "super", "switch",
+    "this", "throw", "try", "typeof", "var", "void", "while", "with", "yield",
+    "async", "await", "of", "true", "false", "null", "undefined",
+
+    /* JavaScript Built-ins */
+    "Array|", "Object|", "String|", "Number|", "Boolean|", "Date|", "Math|",
+    "RegExp|", "Error|", "JSON|", "console|", "window|", "document|", "setTimeout|",
+    "setInterval|", "clearTimeout|", "clearInterval|", "parseInt|", "parseFloat|",
+    "isNaN|", "isFinite|", "encodeURI|", "decodeURI|", "Promise|", "Map|", "Set|",
+    "WeakMap|", "WeakSet|", "Symbol|", "Proxy|", "Reflect|", "Generator|", NULL};
+
+/* TypeScript */
+char *TS_HL_extensions[] = {".ts", ".tsx", ".d.ts", NULL};
+char *TS_HL_keywords[] = {
+    /* TypeScript Keywords (includes JavaScript) */
+    "break", "case", "catch", "class", "const", "continue", "debugger", "default",
+    "delete", "do", "else", "export", "extends", "finally", "for", "function",
+    "if", "import", "in", "instanceof", "let", "new", "return", "super", "switch",
+    "this", "throw", "try", "typeof", "var", "void", "while", "with", "yield",
+    "async", "await", "of", "true", "false", "null", "undefined",
+
+    /* TypeScript Specific */
+    "interface", "type", "enum", "namespace", "module", "declare", "abstract",
+    "implements", "private", "protected", "public", "readonly", "static",
+    "get", "set", "as", "keyof", "infer", "is", "asserts",
+
+    /* TypeScript Types */
+    "string|", "number|", "boolean|", "object|", "any|", "unknown|", "never|",
+    "void|", "bigint|", "symbol|", "Array|", "Promise|", "Record|", "Partial|",
+    "Required|", "Pick|", "Omit|", "Exclude|", "Extract|", "NonNullable|", NULL};
+
+/* C# */
+char *CSHARP_HL_extensions[] = {".cs", ".csx", NULL};
+char *CSHARP_HL_keywords[] = {
+    /* C# Keywords */
+    "abstract", "as", "base", "bool", "break", "byte", "case", "catch", "char",
+    "checked", "class", "const", "continue", "decimal", "default", "delegate",
+    "do", "double", "else", "enum", "event", "explicit", "extern", "false",
+    "finally", "fixed", "float", "for", "foreach", "goto", "if", "implicit",
+    "in", "int", "interface", "internal", "is", "lock", "long", "namespace",
+    "new", "null", "object", "operator", "out", "override", "params", "private",
+    "protected", "public", "readonly", "ref", "return", "sbyte", "sealed",
+    "short", "sizeof", "stackalloc", "static", "string", "struct", "switch",
+    "this", "throw", "true", "try", "typeof", "uint", "ulong", "unchecked",
+    "unsafe", "ushort", "using", "virtual", "void", "volatile", "while",
+    "async", "await", "var", "dynamic", "yield", "where", "when", "nameof",
+
+    /* C# Types */
+    "String|", "Object|", "Int32|", "Boolean|", "Double|", "DateTime|", "List|",
+    "Dictionary|", "Array|", "IEnumerable|", "ICollection|", "IList|", "Task|",
+    "Exception|", "ArgumentException|", "NullReferenceException|", NULL};
+
+/* PHP */
+char *PHP_HL_extensions[] = {".php", ".phtml", ".php3", ".php4", ".php5", ".phps", NULL};
+char *PHP_HL_keywords[] = {
+    /* PHP Keywords */
+    "abstract", "and", "array", "as", "break", "callable", "case", "catch",
+    "class", "clone", "const", "continue", "declare", "default", "die", "do",
+    "echo", "else", "elseif", "empty", "enddeclare", "endfor", "endforeach",
+    "endif", "endswitch", "endwhile", "eval", "exit", "extends", "final",
+    "finally", "for", "foreach", "function", "global", "goto", "if", "implements",
+    "include", "include_once", "instanceof", "insteadof", "interface", "isset",
+    "list", "namespace", "new", "or", "print", "private", "protected", "public",
+    "require", "require_once", "return", "static", "switch", "throw", "trait",
+    "try", "unset", "use", "var", "while", "xor", "yield", "true", "false", "null",
+
+    /* PHP Built-ins */
+    "$_GET|", "$_POST|", "$_SESSION|", "$_COOKIE|", "$_SERVER|", "$_FILES|",
+    "$_ENV|", "$_REQUEST|", "$GLOBALS|", "strlen|", "substr|", "strpos|",
+    "explode|", "implode|", "array_merge|", "array_push|", "array_pop|",
+    "count|", "sizeof|", "is_array|", "is_string|", "is_numeric|", "empty|",
+    "isset|", "unset|", "die|", "exit|", "echo|", "print|", "var_dump|", NULL};
+
+/* Ruby */
+char *RUBY_HL_extensions[] = {".rb", ".rbw", ".rake", ".gemspec", NULL};
+char *RUBY_HL_keywords[] = {
+    /* Ruby Keywords */
+    "alias", "and", "begin", "break", "case", "class", "def", "defined", "do",
+    "else", "elsif", "end", "ensure", "false", "for", "if", "in", "module",
+    "next", "nil", "not", "or", "redo", "rescue", "retry", "return", "self",
+    "super", "then", "true", "undef", "unless", "until", "when", "while", "yield",
+    "require", "include", "extend", "attr_reader", "attr_writer", "attr_accessor",
+
+    /* Ruby Built-ins */
+    "puts|", "print|", "p|", "gets|", "chomp|", "strip|", "length|", "size|",
+    "empty|", "nil|", "class|", "new|", "initialize|", "to_s|", "to_i|", "to_f|",
+    "to_a|", "each|", "map|", "select|", "reject|", "find|", "inject|", "reduce|",
+    "Array|", "Hash|", "String|", "Integer|", "Float|", "Symbol|", "Proc|",
+    "Lambda|", "Method|", "Class|", "Module|", "Object|", "Kernel|", NULL};
+
+/* Swift */
+char *SWIFT_HL_extensions[] = {".swift", NULL};
+char *SWIFT_HL_keywords[] = {
+    /* Swift Keywords */
+    "associatedtype", "class", "deinit", "enum", "extension", "fileprivate", "func",
+    "import", "init", "inout", "internal", "let", "open", "operator", "private",
+    "protocol", "public", "static", "struct", "subscript", "typealias", "var",
+    "break", "case", "continue", "default", "defer", "do", "else", "fallthrough",
+    "for", "guard", "if", "in", "repeat", "return", "switch", "where", "while",
+    "as", "catch", "false", "is", "nil", "rethrows", "super", "self", "Self",
+    "throw", "throws", "true", "try", "async", "await", "some", "any",
+
+    /* Swift Types */
+    "Int|", "Double|", "Float|", "Bool|", "String|", "Character|", "Array|",
+    "Dictionary|", "Set|", "Optional|", "Result|", "Error|", "AnyObject|",
+    "AnyClass|", "Protocol|", "Codable|", "Hashable|", "Equatable|",
+    "Comparable|", "Collection|", "Sequence|", NULL};
+
+/* SQL */
+char *SQL_HL_extensions[] = {".sql", ".ddl", ".dml", NULL};
+char *SQL_HL_keywords[] = {
+    /* SQL Keywords */
+    "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
+    "ALTER", "TABLE", "INDEX", "VIEW", "DATABASE", "SCHEMA", "COLUMN", "PRIMARY",
+    "FOREIGN", "KEY", "REFERENCES", "CONSTRAINT", "UNIQUE", "NOT", "NULL", "DEFAULT",
+    "AUTO_INCREMENT", "IDENTITY", "SERIAL", "BOOLEAN", "TINYINT", "SMALLINT",
+    "MEDIUMINT", "INT", "INTEGER", "BIGINT", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE",
+    "REAL", "BIT", "DATE", "TIME", "DATETIME", "TIMESTAMP", "YEAR", "CHAR", "VARCHAR",
+    "BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB", "TINYTEXT",
+    "TEXT", "MEDIUMTEXT", "LONGTEXT", "ENUM", "SET", "JSON", "GEOMETRY", "POINT",
+    "LINESTRING", "POLYGON", "MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON",
+    "GEOMETRYCOLLECTION", "AND", "OR", "IN", "BETWEEN", "LIKE", "IS", "EXISTS",
+    "ANY", "ALL", "SOME", "UNION", "INTERSECT", "EXCEPT", "INNER", "LEFT", "RIGHT",
+    "FULL", "OUTER", "JOIN", "ON", "USING", "GROUP", "BY", "HAVING", "ORDER", "ASC",
+    "DESC", "LIMIT", "OFFSET", "DISTINCT", "AS", "CASE", "WHEN", "THEN", "ELSE", "END",
+    "IF", "IFNULL", "ISNULL", "COALESCE", "NULLIF", "CAST", "CONVERT", "SUBSTRING",
+    "LENGTH", "UPPER", "LOWER", "TRIM", "LTRIM", "RTRIM", "REPLACE", "CONCAT",
+    "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "NOW", "COUNT", "SUM",
+    "AVG", "MIN", "MAX", "STDDEV", "VARIANCE", "BEGIN", "COMMIT", "ROLLBACK",
+    "TRANSACTION", "SAVEPOINT", "GRANT", "REVOKE", "LOCK", "UNLOCK",
+
+    /* SQL Functions and Operators */
+    "TRUE|", "FALSE|", "UNKNOWN|", NULL};
+
+/* Rust */
+char *RUST_HL_extensions[] = {".rs", ".rlib", NULL};
+char *RUST_HL_keywords[] = {
+    /* Rust Keywords */
+    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else",
+    "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop",
+    "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static",
+    "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while",
+    "abstract", "become", "box", "do", "final", "macro", "override", "priv",
+    "typeof", "unsized", "virtual", "yield", "try", "union", "catch", "default",
+
+    /* Rust Types */
+    "i8|", "i16|", "i32|", "i64|", "i128|", "isize|", "u8|", "u16|", "u32|", "u64|",
+    "u128|", "usize|", "f32|", "f64|", "bool|", "char|", "str|", "String|", "Vec|",
+    "HashMap|", "HashSet|", "BTreeMap|", "BTreeSet|", "Option|", "Result|", "Box|",
+    "Rc|", "Arc|", "RefCell|", "Cell|", "Mutex|", "RwLock|", "thread|", "Clone|",
+    "Copy|", "Send|", "Sync|", "Drop|", "Display|", "Debug|", "Default|", "PartialEq|",
+    "Eq|", "PartialOrd|", "Ord|", "Hash|", "Iterator|", "IntoIterator|", NULL};
+
+/* Dart */
+char *DART_HL_extensions[] = {".dart", NULL};
+char *DART_HL_keywords[] = {
+    /* Dart Keywords */
+    "abstract", "as", "assert", "async", "await", "break", "case", "catch", "class",
+    "const", "continue", "covariant", "default", "deferred", "do", "dynamic", "else",
+    "enum", "export", "extends", "extension", "external", "factory", "false", "final",
+    "finally", "for", "Function", "get", "hide", "if", "implements", "import", "in",
+    "interface", "is", "late", "library", "mixin", "new", "null", "on", "operator",
+    "part", "required", "rethrow", "return", "set", "show", "static", "super", "switch",
+    "sync", "this", "throw", "true", "try", "typedef", "var", "void", "while", "with",
+    "yield",
+
+    /* Dart Types */
+    "int|", "double|", "num|", "String|", "bool|", "List|", "Map|", "Set|", "Object|",
+    "dynamic|", "var|", "void|", "Future|", "Stream|", "Iterable|", "Iterator|",
+    "Comparable|", "Duration|", "DateTime|", "Uri|", "RegExp|", "StringBuffer|",
+    "Symbol|", "Type|", "Function|", "Null|", NULL};
+
+/* Shell */
+char *SHELL_HL_extensions[] = {
+    ".sh", ".bash", ".zsh", ".ksh", ".csh", ".tcsh",
+    ".profile", ".bashrc", ".bash_profile", ".bash_login",
+    ".zshrc", ".zshenv", ".zlogin", ".zprofile",
+    NULL};
+
+char *SHELL_HL_keywords[] = {
+    /* Shell Keywords */
+    "if", "then", "else", "elif", "fi", "case", "esac", "for", "while",
+    "until", "do", "done", "select", "function", "in", "time", "coproc",
+
+    /* Common commands */
+    "alias|", "bg|", "bind|", "break|", "builtin|", "caller|", "cd|",
+    "command|", "compgen|", "complete|", "continue|", "declare|",
+    "dirs|", "disown|", "echo|", "enable|", "eval|", "exec|", "exit|",
+    "export|", "false|", "fc|", "fg|", "getopts|", "hash|", "help|",
+    "history|", "jobs|", "kill|", "let|", "local|", "logout|", "mapfile|",
+    "popd|", "printf|", "pushd|", "pwd|", "read|", "readarray|",
+    "readonly|", "return|", "set|", "shift|", "shopt|", "source|",
+    "suspend|", "test|", "times|", "trap|", "true|", "type|", "typeset|",
+    "ulimit|", "umask|", "unalias|", "unset|", "wait|",
+
+    /* System utilities */
+    "awk|", "cat|", "chmod|", "chown|", "cp|", "curl|", "cut|", "date|",
+    "df|", "diff|", "dig|", "du|", "find|", "grep|", "head|", "ln|", "ls|",
+    "mkdir|", "mv|", "ping|", "ps|", "rm|", "rsync|", "scp|", "sed|",
+    "ssh|", "sudo|", "tail|", "tar|", "top|", "touch|", "tr|", "uniq|",
+    "wc|", "wget|", "which|", "xargs|",
+
+    /* Special variables */
+    "$BASH|", "$BASHOPTS|", "$BASHPID|", "$BASH_ALIASES|",
+    "$BASH_ARGC|", "$BASH_ARGV|", "$BASH_CMDS|", "$BASH_COMMAND|",
+    "$BASH_ENV|", "$BASH_LINENO|", "$BASH_SOURCE|", "$BASH_SUBSHELL|",
+    "$BASH_VERSION|", "$DIRSTACK|", "$EUID|", "$FUNCNAME|",
+    "$GROUPS|", "$HOME|", "$HOSTNAME|", "$HOSTTYPE|", "$IFS|",
+    "$LINENO|", "$MACHTYPE|", "$OLDPWD|", "$OPTARG|", "$OPTIND|",
+    "$OSTYPE|", "$PATH|", "$PIPESTATUS|", "$PPID|", "$PS1|",
+    "$PS2|", "$PS3|", "$PS4|", "$PWD|", "$RANDOM|", "$REPLY|",
+    "$SECONDS|", "$SHELL|", "$SHELLOPTS|", "$SHLVL|", "$UID|",
+    NULL};
+
+/* HTML */
+char *HTML_HL_extensions[] = {".html", ".htm", ".xhtml", NULL};
+char *HTML_HL_keywords[] = {
+    /* Opening tags */
+    "<a>", "<abbr>", "<address>", "<area>", "<article>", "<aside>", "<audio>",
+    "<b>", "<base>", "<bdi>", "<bdo>", "<blockquote>", "<body>", "<br>", "<button>",
+    "<canvas>", "<caption>", "<cite>", "<code>", "<col>", "<colgroup>",
+    "<data>", "<datalist>", "<dd>", "<del>", "<details>", "<dfn>", "<dialog>",
+    "<div>", "<dl>", "<dt>", "<em>", "<embed>",
+    "<fieldset>", "<figcaption>", "<figure>", "<footer>", "<form>",
+    "<h1>", "<h2>", "<h3>", "<h4>", "<h5>", "<h6>", "<head>", "<header>", "<hr>", "<html>",
+    "<i>", "<iframe>", "<img>", "<input>", "<ins>",
+    "<kbd>", "<label>", "<legend>", "<li>", "<link>",
+    "<main>", "<map>", "<mark>", "<meta>", "<meter>",
+    "<nav>", "<noscript>",
+    "<object>", "<ol>", "<optgroup>", "<option>", "<output>",
+    "<p>", "<param>", "<picture>", "<pre>", "<progress>",
+    "<q>", "<rp>", "<rt>", "<ruby>",
+    "<s>", "<samp>", "<script>", "<section>", "<select>", "<small>", "<source>",
+    "<span>", "<strong>", "<style>", "<sub>", "<summary>", "<sup>", "<svg>",
+    "<table>", "<tbody>", "<td>", "<template>", "<textarea>", "<tfoot>", "<th>", "<thead>",
+    "<time>", "<title>", "<tr>", "<track>",
+    "<u>", "<ul>",
+    "<var>", "<video>",
+    "<wbr>",
+
+    /* Closing tags */
+    "</a>", "</abbr>", "</address>", "</article>", "</aside>", "</audio>",
+    "</b>", "</bdi>", "</bdo>", "</blockquote>", "</body>", "</button>",
+    "</canvas>", "</caption>", "</cite>", "</code>", "</colgroup>",
+    "</data>", "</datalist>", "</dd>", "</del>", "</details>", "</dfn>", "</dialog>",
+    "</div>", "</dl>", "</dt>", "</em>",
+    "</fieldset>", "</figcaption>", "</figure>", "</footer>", "</form>",
+    "</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "</head>", "</header>", "</html>",
+    "</i>", "</iframe>", "</ins>",
+    "</kbd>", "</label>", "</legend>", "</li>",
+    "</main>", "</map>", "</mark>", "</meter>",
+    "</nav>", "</noscript>",
+    "</object>", "</ol>", "</optgroup>", "</option>", "</output>",
+    "</p>", "</picture>", "</pre>", "</progress>",
+    "</q>", "</rp>", "</rt>", "</ruby>",
+    "</s>", "</samp>", "</script>", "</section>", "</select>", "</small>",
+    "</span>", "</strong>", "</style>", "</sub>", "</summary>", "</sup>", "</svg>",
+    "</table>", "</tbody>", "</td>", "</template>", "</textarea>", "</tfoot>", "</th>", "</thead>",
+    "</time>", "</title>", "</tr>",
+    "</u>", "</ul>",
+    "</var>", "</video>",
+
+    /* Self-closing/void elements */
+    "<area/>", "<base/>", "<br/>", "<col/>", "<embed/>", "<hr/>", "<img/>", "<input/>",
+    "<link/>", "<meta/>", "<param/>", "<source/>", "<track/>", "<wbr/>",
+
+    /* Doctype */
+    "<!DOCTYPE>",
+    NULL};
+
+/* React (JSX) */
+char *REACT_HL_extensions[] = {".jsx", ".tsx", NULL};
+char *REACT_HL_keywords[] = {
+    /* React Components */
+    "Component|", "PureComponent|", "memo|", "Fragment|", "StrictMode|", "Suspense|",
+    "lazy|", "Profiler|", "Children|", "createRef|", "forwardRef|",
+
+    /* React Hooks */
+    "useState|", "useEffect|", "useContext|", "useReducer|", "useCallback|",
+    "useMemo|", "useRef|", "useImperativeHandle|", "useLayoutEffect|",
+    "useDebugValue|",
+
+    /* React APIs */
+    "createContext|", "createElement|", "cloneElement|", "createFactory|",
+    "isValidElement|", "ReactDOM|", "ReactDOMServer|",
+
+    /* React Events */
+    "onClick|", "onContextMenu|", "onDoubleClick|", "onDrag|", "onDragEnd|",
+    "onDragEnter|", "onDragExit|", "onDragLeave|", "onDragOver|", "onDragStart|",
+    "onDrop|", "onMouseDown|", "onMouseEnter|", "onMouseLeave|", "onMouseMove|",
+    "onMouseOut|", "onMouseOver|", "onMouseUp|", "onSelect|", "onTouchCancel|",
+    "onTouchEnd|", "onTouchMove|", "onTouchStart|", "onScroll|", "onWheel|",
+    "onCopy|", "onCut|", "onPaste|", "onKeyDown|", "onKeyPress|", "onKeyUp|",
+    "onFocus|", "onBlur|", "onChange|", "onInput|", "onInvalid|", "onSubmit|",
+
+    /* JSX-specific */
+    "className|", "htmlFor|", "dangerouslySetInnerHTML|",
+    NULL};
+
+/* Vue.js */
+char *VUE_HL_extensions[] = {".vue", NULL};
+char *VUE_HL_keywords[] = {
+    /* Vue Directives */
+    "v-text|", "v-html|", "v-show|", "v-if|", "v-else|", "v-else-if|", "v-for|",
+    "v-on|", "v-bind|", "v-model|", "v-slot|", "v-pre|", "v-cloak|", "v-once|",
+
+    /* Vue Events */
+    "@click|", "@input|", "@change|", "@submit|", "@keydown|", "@keyup|", "@mouseover|",
+    "@mousemove|", "@mouseleave|", "@focus|", "@blur|", "@scroll|", "@load|",
+
+    /* Vue Special Attributes */
+    ":key|", ":class|", ":style|", ":ref|", ":is|", ":slot|", ":props|",
+
+    /* Vue Options */
+    "data|", "props|", "computed|", "methods|", "watch|", "components|", "filters|",
+    "directives|", "mixins|", "extends|", "provide|", "inject|", "template|",
+    "render|", "el|", "name|", "functional|", "model|", "propsData|",
+
+    /* Vue Lifecycle Hooks */
+    "beforeCreate|", "created|", "beforeMount|", "mounted|", "beforeUpdate|",
+    "updated|", "activated|", "deactivated|", "beforeDestroy|", "destroyed|",
+    "errorCaptured|", "serverPrefetch|",
+
+    /* Vue API */
+    "Vue.directive|", "Vue.filter|", "Vue.component|", "Vue.mixin|",
+    "Vue.use|", "Vue.extend|", "Vue.set|", "Vue.delete|", "Vue.nextTick|",
+    "Vue.observable|", "Vue.version|",
+
+    /* Vue Router */
+    "router-link|", "router-view|", "$route|", "$router|",
+    NULL};
+
+/* Angular */
+char *ANGULAR_HL_extensions[] = {".component.ts", NULL};
+char *ANGULAR_HL_keywords[] = {
+    /* Angular Decorators */
+    "@Component|", "@Directive|", "@Pipe|", "@Injectable|", "@NgModule|",
+    "@Input|", "@Output|", "@HostBinding|", "@HostListener|", "@ViewChild|",
+    "@ViewChildren|", "@ContentChild|", "@ContentChildren|",
+
+    /* Angular Directives */
+    "*ngIf|", "*ngFor|", "*ngSwitch|", "*ngSwitchCase|", "*ngSwitchDefault|",
+    "[ngClass]|", "[ngStyle]|", "[ngModel]|", "[ngTemplateOutlet]|",
+    "ng-template|", "ng-container|", "ng-content|",
+
+    /* Angular Lifecycle Hooks */
+    "ngOnChanges|", "ngOnInit|", "ngDoCheck|", "ngAfterContentInit|",
+    "ngAfterContentChecked|", "ngAfterViewInit|", "ngAfterViewChecked|",
+    "ngOnDestroy|",
+
+    /* Angular Services */
+    "HttpClient|", "HttpHandler|", "HttpInterceptor|", "HttpClientModule|",
+    "Router|", "ActivatedRoute|", "RouterModule|", "Location|",
+
+    /* Angular Pipes */
+    "async|", "date|", "currency|", "decimal|", "percent|", "json|", "lowercase|",
+    "uppercase|", "titlecase|", "slice|", "i18nSelect|", "i18nPlural|",
+
+    /* Angular Forms */
+    "FormGroup|", "FormControl|", "FormArray|", "FormBuilder|", "Validators|",
+    "ReactiveFormsModule|", "FormsModule|",
+
+    /* Angular Testing */
+    "TestBed|", "ComponentFixture|", "fakeAsync|", "tick|", "async|", "inject|",
+    NULL};
+
+/* Svelte */
+char *SVELTE_HL_extensions[] = {".svelte", NULL};
+char *SVELTE_HL_keywords[] = {
+    /* Svelte Directives */
+    "on:|", "bind:|", "class:|", "use:|", "transition:|", "in:|", "out:|",
+    "animate:|", "let:|", "export|", "as|", "in|", "out|", "animate|",
+
+    /* Svelte Events */
+    "onclick|", "oninput|", "onchange|", "onsubmit|", "onkeydown|", "onkeyup|",
+    "onmouseover|", "onmousemove|", "onmouseleave|", "onfocus|", "onblur|",
+    "onscroll|", "onload|",
+
+    /* Svelte Actions */
+    "use:action|", "use:enhance|",
+
+    /* Svelte Transitions */
+    "transition:fade|", "transition:slide|", "transition:blur|", "transition:fly|",
+    "transition:scale|", "transition:draw|", "transition:crossfade|",
+
+    /* Svelte Stores */
+    "writable|", "readable|", "derived|", "get|", "subscribe|", "set|", "update|",
+
+    /* Svelte Special Elements */
+    "svelte:self|", "svelte:component|", "svelte:window|", "svelte:body|",
+    "svelte:head|", "svelte:options|",
+
+    /* Svelte Runtime */
+    "beforeUpdate|", "afterUpdate|", "onMount|", "onDestroy|", "tick|",
+    "createEventDispatcher|", "getContext|", "setContext|", "hasContext|",
+    "all|", "setTimeout|", "setInterval|", "requestAnimationFrame|",
+    NULL};
+
+/* Here we define an array of syntax highlights by extensions, keywords,
+ * comments delimiters and flags. */
 struct editorSyntax HLDB[] = {
-   { 
-        "c",
-        C_HL_extensions,
-        C_HL_keywords,
+    {/* C / C++ */
+     C_HL_extensions,
+     C_HL_keywords,
+     "//", "/*", "*/",
+     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+    {/* Python */
+     PYTHON_HL_extensions,
+     PYTHON_HL_keywords,
+     "#", "", "",
+     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+    {/* Java */
+     JAVA_HL_extensions,
+     JAVA_HL_keywords,
+     "//", "/*", "*/",
+     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+    {/* JavaScript */
+     JS_HL_extensions,
+     JS_HL_keywords,
+     "//", "/*", "*/",
+     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+    {/* TypeScript */
+     TS_HL_extensions,
+     TS_HL_keywords,
+     "//", "/*", "*/",
+     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+    {/* C# */
+     CSHARP_HL_extensions,
+     CSHARP_HL_keywords,
+     "//", "/*", "*/",
+     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+    {/* PHP */
+     PHP_HL_extensions,
+     PHP_HL_keywords,
+     "//", "/*", "*/",
+     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+    {/* Ruby */
+     RUBY_HL_extensions,
+     RUBY_HL_keywords,
+     "#", "", "",
+     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+    {/* Swift */
+     SWIFT_HL_extensions,
+     SWIFT_HL_keywords,
+     "//", "/*", "*/",
+     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+    {/* SQL */
+     SQL_HL_extensions,
+     SQL_HL_keywords,
+     "--", "/*", "*/",
+     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+    {/* Rust */
+     RUST_HL_extensions,
+     RUST_HL_keywords,
+     "//", "/*", "*/",
+     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+    {/* Dart */
+     DART_HL_extensions,
+     DART_HL_keywords,
+     "//", "/*", "*/",
+     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+    {/* Shell */
+     SHELL_HL_extensions,
+     SHELL_HL_keywords,
+     "#", "", "",
+     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+
+    /* HTML */
+    {
+        HTML_HL_extensions,
+        HTML_HL_keywords,
+        "<!--",
+        "",
+        "-->",
+        HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+
+    /* React */
+    {
+        REACT_HL_extensions,
+        REACT_HL_keywords,
         "//", "/*", "*/",
-        HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS
-    },
+        HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+
+    /* Vue */
+    {
+        VUE_HL_extensions,
+        VUE_HL_keywords,
+        "<!--", "", "-->",
+        HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+
+    /* Angular */
+    {
+        ANGULAR_HL_extensions,
+        ANGULAR_HL_keywords,
+        "//", "/*", "*/",
+        HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
+
+    /* Svelte */
+    {
+        SVELTE_HL_extensions,
+        SVELTE_HL_keywords,
+        "<!--", "", "-->",
+        HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS}
+
 };
 
 #define HLDB_ENTRIES (sizeof(HLDB) / sizeof(HLDB[0]))
 
 /*** prototypes ***/
-void editorSetStatusMessage(const char *fmt, ...);
+
 void editorRefreshScreen();
 char *editorPrompt(char *prompt, void (*callback)(char *, int));
 
