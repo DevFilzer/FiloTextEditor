@@ -107,7 +107,7 @@ struct editorSyntax HLDB[] = {
         C_HL_extensions,
         C_HL_keywords,
         "//", "/*", "*/",
-        HL_HIGHLIGHT_NUMBERS || HL_HIGHLIGHT_STRINGS
+        HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS
     },
 };
 
@@ -168,7 +168,8 @@ int editorReadKey() {
                 if (seq[2] == '~') {
                     switch (seq[1]) {
                         case '1' : return HOME_KEY;
-                        case '3' : return DEL_KEY;                        case '4' : return END_KEY;
+                        case '3' : return DEL_KEY;                        
+                        case '4' : return END_KEY;
                         case '5' : return PAGE_UP;
                         case '6' : return PAGE_DOWN;
                         case '7' : return HOME_KEY;
@@ -207,7 +208,7 @@ int getCursorPosition(int *rows, int *cols) {
 
     while (i < sizeof(buf) - 1)
     {
-        if (read(STDERR_FILENO, &buf[i], 1) != 1) break;
+        if (read(STDIN_FILENO, &buf[i], 1) != 1) break;
         if (buf[i] == 'R') break;
         i++;
     }
@@ -243,7 +244,9 @@ int is_separator(int c) {
 
 void editorUpdateSyntax(erow *row) {
     row->hl = realloc(row->hl, row->rsize);
-    memset(row->hl, HL_NORMAL, row->rsize);
+    if (row->rsize > 0) {
+        memset(row->hl, HL_NORMAL, row->rsize);
+    }
 
     if (E.syntax == NULL) return;
 
@@ -691,7 +694,7 @@ void editorFind() {
     int saved_coloff = E.coloff;
     int saved_rowoff = E.rowoff;
 
-    char *query = editorPrompt("Search %s (Use ASC/Arrows/Enter)", editorFindCallback);
+    char *query = editorPrompt("Search %s (Use ESC/Arrows/Enter)", editorFindCallback);
     if (query) {
         free(query);
     }
@@ -820,7 +823,7 @@ void editorDrawStatusBar(struct abuf *ab) {
     int len = snprintf(status, sizeof(status), "%.20s - %d lines %s",
         E.filename ? E.filename : "[No Name]", E.numrows,
         E.dirty ? "(modified)" : "");
-    int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d",
+    int rlen = snprintf(rstatus, sizeof(rstatus), "%s | %d/%d",
         E.syntax ? E.syntax->filetype : "no ft", E.cy + 1, E.numrows);
     if (len > E.screencols) len =  E.screencols;
     abAppend(ab, status, len);
