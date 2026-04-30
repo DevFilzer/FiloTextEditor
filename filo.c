@@ -19,7 +19,7 @@
 #include <unistd.h>
 
 /*** defines ***/
-#define FILO_VERSION "1.0.0"
+#define FILO_VERSION "1.0.1"
 #define FILO_TAB_STOP 8
 #define FILO_QUIT_TIMES 3
 #define FILO_QUERY_LEN 256
@@ -940,21 +940,29 @@ void editorSave(void) {
     int len;
     char *buf = editorRowsToString(&len);
 
-    int fd = open(E.filename, O_RDWR | O_CREAT, 0644);
-    if (fd != -1) {
-        if (ftruncate(fd, len) != -1) {
-            if (write(fd, buf, len) == len) {
-                close(fd);
-                free(buf);
-                E.dirty = 0;
-                editorSetStatusMessage("%d bytes written to disk", len);
-                return;
-            }
-        }
-        close(fd);
-    }
+    char tmpname[1024];
+    snprintf(tmpname, sizeof(tmpname), "%s.tmp", E.filename);
+
+    int fd = open(tmpname, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd == -1) goto fail;
+
+    if (write(fd, buf, len) != len) goto fail;
+    if (fsync(fd) == -1) goto fail;
+
+    close(fd);
+
+    if (rename(tmpname, E.filename) == -1) goto fail;
+
     free(buf);
-    editorSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
+    E.dirty = 0;
+    editorSetStatusMessage("%d bytes written safely", len);
+    return;
+
+fail:
+    close(fd);
+    unlink(tmpname);
+    free(buf);
+    editorSetStatusMessage("Save failed: %s", strerror(errno));
 }
 
 /*** find ***/
@@ -1386,7 +1394,7 @@ void initEditor(void) {
     E.coloff = 0;
     E.numrows = 0;
     E.row   = NULL;
-    E.dirty = 0;git
+    E.dirty = 0;
     E.rawmode   = 0;
     E.paste_mode = 0;
     E.last_key  = 0;
