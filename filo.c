@@ -1,48 +1,34 @@
 /*** includes ***/
-#define  _DEFAULT_SOURCE
-#define _BSD_SOURCE // change in case of conflict
+#define _DEFAULT_SOURCE
+#define _BSD_SOURCE
 #define _GNU_SOURCE
 
-#include <ctype.h>  
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
-#include <stdio.h>
-#include <stdint.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <sys/types.h>
 #include <sys/time.h>
+#include <sys/types.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
 /*** defines ***/
-#define FILO_VERSION "1.0.1"
+#define FILO_VERSION "1.0.0"
 #define FILO_TAB_STOP 8
 #define FILO_QUIT_TIMES 3
+#define FILO_QUERY_LEN 256
 
 #define CTRL_KEY(k) ((k) & 0x1f)
 
 enum editorKey {
-    KELL_NULL = 0,
-    CTRL_C = 3,
-    CTRL_D = 4,
-    CTRL_F = 6,
-    CTRL_H = 8,
-    TAB = 9,
-    CTRL_L = 12,
-    ENTER = 13,
-    CTRL_Q = 17,
-    CTRL_S = 19,
-    CTRL_U = 21,
-    ESC = 27,
-    BACKSPACE = 127,
-
-    // Non-comadding keys
-    ARROW_LEFT = 1000,
+    BACKSPACE   = 127,
+    ARROW_LEFT  = 1000,
     ARROW_RIGHT,
     ARROW_UP,
     ARROW_DOWN,
@@ -53,26 +39,29 @@ enum editorKey {
     PAGE_DOWN
 };
 
-#define HL_NORMAL 0
-#define HL_NONPRINT 1
-#define HL_COMMENT 2 
-#define HL_MLCOMMENT 3
-#define HL_KEYWORD1 4
-#define HL_KEYWORD2 5
-#define HL_STRING 6
-#define HL_NUMBER 7
-#define HL_MATCH 8
+enum editorHighlight {
+    HL_NORMAL    = 0,
+    HL_NONPRINT,
+    HL_COMMENT,
+    HL_MLCOMMENT,
+    HL_KEYWORD1,
+    HL_KEYWORD2,
+    HL_STRING,
+    HL_NUMBER,
+    HL_MATCH
+};
 
-#define HL_HIGHLIGHT_NUMBERS (1 << 0)
-#define HL_HIGHLIGHT_STRINGS (1 << 1)
+#define HL_HIGHLIGHT_NUMBERS (1<<0)
+#define HL_HIGHLIGHT_STRINGS (1<<1)
 
 /*** data ***/
 struct editorSyntax {
+    char *filetype;
     char **filematch;
     char **keywords;
-    char *singleline_comment_start[5]; // 4 chars + null -> cover most languages
-    char *multiline_comment_start[5];
-    char *multiline_comment_end[5];
+    char *singleline_comment_start;
+    char *multiline_comment_start;
+    char *multiline_comment_end;
     int flags;
 };
 
@@ -86,744 +75,424 @@ typedef struct erow {
     int hl_open_comment;
 } erow;
 
-typedef struct highlight_color {
-    int r, g, b;
-} highlight_color;
-
-struct editorConfig 
-{
-    int cx, cy; // cursor x and y in chars
+struct editorConfig {
+    int cx, cy;
+    int rx;
     int rowoff;
     int coloff;
     int screenrows;
     int screencols;
     int numrows;
-    int rawmode; // is raw mode on? in the terminal
     erow *row;
     int dirty;
-    int paste_mode; // disables autocomplete
-    int last_key; // last key pressed by user
+    int rawmode;
+    int paste_mode;
+    int last_key;
     char *filename;
     char statusmsg[80];
     time_t statusmsg_time;
     struct editorSyntax *syntax;
-    struct timeval last_char_time; // time of last char for paste detection
+    struct termios orig_termios;
+    struct timeval last_char_time;
 };
 
 struct editorConfig E;
 
-void editorSetStatusMessage(const char *fmt, ...);
-
 /*** filetypes ***/
-char *C_HL_extensions[] = {".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".c++", ".hxx", ".h++", NULL};
+
+char *C_HL_extensions[] = { ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", NULL };
 char *C_HL_keywords[] = {
-    /* C Keywords */
-    "auto", "break", "case", "continue", "default", "do", "else", "enum",
-    "extern", "for", "goto", "if", "register", "return", "sizeof", "static",
-    "struct", "switch", "typedef", "union", "volatile", "while", "NULL",
+    "auto","break","case","continue","default","do","else","enum",
+    "extern","for","goto","if","register","return","sizeof","static",
+    "struct","switch","typedef","union","volatile","while","NULL",
+    "alignas","alignof","and","and_eq","asm","bitand","bitor","class",
+    "compl","constexpr","const_cast","delete","dynamic_cast",
+    "explicit","export","false","friend","inline","mutable","namespace",
+    "new","noexcept","not","not_eq","nullptr","operator","or","or_eq",
+    "private","protected","public","reinterpret_cast","static_assert",
+    "static_cast","template","this","thread_local","throw","true","try",
+    "typeid","typename","virtual","xor","xor_eq",
+    "int|","long|","double|","float|","char|","unsigned|","signed|",
+    "void|","short|","const|","bool|", NULL
+};
 
-    /* C++ Keywords */
-    "alignas", "alignof", "and", "and_eq", "asm", "bitand", "bitor", "class",
-    "compl", "constexpr", "const_cast", "deltype", "delete", "dynamic_cast",
-    "explicit", "export", "false", "friend", "inline", "mutable", "namespace",
-    "new", "noexcept", "not", "not_eq", "nullptr", "operator", "or", "or_eq",
-    "private", "protected", "public", "reinterpret_cast", "static_assert",
-    "static_cast", "template", "this", "thread_local", "throw", "true", "try",
-    "typeid", "typename", "virtual", "xor", "xor_eq",
-
-    /* C types */
-    "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
-    "void|", "short|", "auto|", "const|", "bool|", NULL};
-
-/* Python */
-char *PYTHON_HL_extensions[] = {".py", ".pyw", ".pyi", ".pyx", NULL};
+char *PYTHON_HL_extensions[] = { ".py", ".pyw", ".pyi", ".pyx", NULL };
 char *PYTHON_HL_keywords[] = {
-    /* Python Keywords */
-    "and", "as", "assert", "break", "class", "continue", "def", "del",
-    "elif", "else", "except", "exec", "finally", "for", "from", "global",
-    "if", "import", "in", "is", "lambda", "not", "or", "pass", "print",
-    "raise", "return", "try", "while", "with", "yield", "async", "await",
-    "nonlocal", "True", "False", "None",
+    "and","as","assert","break","class","continue","def","del",
+    "elif","else","except","exec","finally","for","from","global",
+    "if","import","in","is","lambda","not","or","pass","print",
+    "raise","return","try","while","with","yield","async","await",
+    "nonlocal","True","False","None",
+    "abs|","all|","any|","bin|","bool|","bytearray|","bytes|","callable|",
+    "chr|","classmethod|","compile|","complex|","delattr|","dict|","dir|",
+    "divmod|","enumerate|","eval|","exec|","filter|","float|","format|",
+    "frozenset|","getattr|","globals|","hasattr|","hash|","help|","hex|",
+    "id|","input|","int|","isinstance|","issubclass|","iter|","len|",
+    "list|","locals|","map|","max|","memoryview|","min|","next|","object|",
+    "oct|","open|","ord|","pow|","property|","range|","repr|","reversed|",
+    "round|","set|","setattr|","slice|","sorted|","staticmethod|","str|",
+    "sum|","super|","tuple|","type|","vars|","zip|","self|","cls|", NULL
+};
 
-    /* Python Built-ins */
-    "abs|", "all|", "any|", "bin|", "bool|", "bytearray|", "bytes|", "callable|",
-    "chr|", "classmethod|", "compile|", "complex|", "delattr|", "dict|", "dir|",
-    "divmod|", "enumerate|", "eval|", "exec|", "filter|", "float|", "format|",
-    "frozenset|", "getattr|", "globals|", "hasattr|", "hash|", "help|", "hex|",
-    "id|", "input|", "int|", "isinstance|", "issubclass|", "iter|", "len|",
-    "list|", "locals|", "map|", "max|", "memoryview|", "min|", "next|", "object|",
-    "oct|", "open|", "ord|", "pow|", "property|", "range|", "repr|", "reversed|",
-    "round|", "set|", "setattr|", "slice|", "sorted|", "staticmethod|", "str|",
-    "sum|", "super|", "tuple|", "type|", "vars|", "zip|", "self|", "cls|", NULL};
-
-/* Java */
-char *JAVA_HL_extensions[] = {".java", ".class", NULL};
+char *JAVA_HL_extensions[] = { ".java", NULL };
 char *JAVA_HL_keywords[] = {
-    /* Java Keywords */
-    "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char",
-    "class", "const", "continue", "default", "do", "double", "else", "enum",
-    "extends", "final", "finally", "float", "for", "goto", "if", "implements",
-    "import", "instanceof", "int", "interface", "long", "native", "new", "package",
-    "private", "protected", "public", "return", "short", "static", "strictfp",
-    "super", "switch", "synchronized", "this", "throw", "throws", "transient",
-    "try", "void", "volatile", "while", "true", "false", "null",
+    "abstract","assert","break","case","catch","class","const","continue",
+    "default","do","else","enum","extends","final","finally","for","goto",
+    "if","implements","import","instanceof","interface","native","new","package",
+    "private","protected","public","return","static","strictfp","super",
+    "switch","synchronized","this","throw","throws","transient","try",
+    "volatile","while","true","false","null",
+    "boolean|","byte|","char|","double|","float|","int|","long|","short|","void|",
+    "String|","Object|","Class|","System|","Thread|","Exception|",
+    "RuntimeException|","ArrayList|","HashMap|","List|","Map|","Set|",
+    "Collection|","Iterator|", NULL
+};
 
-    /* Java Types and Common Classes */
-    "String|", "Object|", "Class|", "System|", "Thread|", "Runnable|",
-    "Exception|", "RuntimeException|", "ArrayList|", "HashMap|", "List|",
-    "Map|", "Set|", "Collection|", "Iterator|", "Comparable|", "Serializable|", NULL};
-
-/* JavaScript */
-char *JS_HL_extensions[] = {".js", ".jsx", ".mjs", ".cjs", NULL};
+char *JS_HL_extensions[] = { ".js", ".mjs", ".cjs", NULL };
 char *JS_HL_keywords[] = {
-    /* JavaScript Keywords */
-    "break", "case", "catch", "class", "const", "continue", "debugger", "default",
-    "delete", "do", "else", "export", "extends", "finally", "for", "function",
-    "if", "import", "in", "instanceof", "let", "new", "return", "super", "switch",
-    "this", "throw", "try", "typeof", "var", "void", "while", "with", "yield",
-    "async", "await", "of", "true", "false", "null", "undefined",
+    "break","case","catch","class","const","continue","debugger","default",
+    "delete","do","else","export","extends","finally","for","function",
+    "if","import","in","instanceof","let","new","return","super","switch",
+    "this","throw","try","typeof","var","void","while","with","yield",
+    "async","await","of","true","false","null","undefined",
+    "Array|","Object|","String|","Number|","Boolean|","Date|","Math|",
+    "RegExp|","Error|","JSON|","console|","Promise|","Map|","Set|",
+    "parseInt|","parseFloat|","isNaN|","isFinite|","Symbol|", NULL
+};
 
-    /* JavaScript Built-ins */
-    "Array|", "Object|", "String|", "Number|", "Boolean|", "Date|", "Math|",
-    "RegExp|", "Error|", "JSON|", "console|", "window|", "document|", "setTimeout|",
-    "setInterval|", "clearTimeout|", "clearInterval|", "parseInt|", "parseFloat|",
-    "isNaN|", "isFinite|", "encodeURI|", "decodeURI|", "Promise|", "Map|", "Set|",
-    "WeakMap|", "WeakSet|", "Symbol|", "Proxy|", "Reflect|", "Generator|", NULL};
-
-/* TypeScript */
-char *TS_HL_extensions[] = {".ts", ".tsx", ".d.ts", NULL};
+char *TS_HL_extensions[] = { ".ts", NULL };
 char *TS_HL_keywords[] = {
-    /* TypeScript Keywords (includes JavaScript) */
-    "break", "case", "catch", "class", "const", "continue", "debugger", "default",
-    "delete", "do", "else", "export", "extends", "finally", "for", "function",
-    "if", "import", "in", "instanceof", "let", "new", "return", "super", "switch",
-    "this", "throw", "try", "typeof", "var", "void", "while", "with", "yield",
-    "async", "await", "of", "true", "false", "null", "undefined",
+    "break","case","catch","class","const","continue","debugger","default",
+    "delete","do","else","export","extends","finally","for","function",
+    "if","import","in","instanceof","let","new","return","super","switch",
+    "this","throw","try","typeof","var","void","while","with","yield",
+    "async","await","of","true","false","null","undefined",
+    "interface","type","enum","namespace","module","declare","abstract",
+    "implements","private","protected","public","readonly","static",
+    "get","set","as","keyof","infer","is","asserts",
+    "string|","number|","boolean|","object|","any|","unknown|","never|",
+    "void|","bigint|","symbol|","Array|","Promise|","Record|","Partial|",
+    "Required|","Pick|","Omit|", NULL
+};
 
-    /* TypeScript Specific */
-    "interface", "type", "enum", "namespace", "module", "declare", "abstract",
-    "implements", "private", "protected", "public", "readonly", "static",
-    "get", "set", "as", "keyof", "infer", "is", "asserts",
-
-    /* TypeScript Types */
-    "string|", "number|", "boolean|", "object|", "any|", "unknown|", "never|",
-    "void|", "bigint|", "symbol|", "Array|", "Promise|", "Record|", "Partial|",
-    "Required|", "Pick|", "Omit|", "Exclude|", "Extract|", "NonNullable|", NULL};
-
-/* C# */
-char *CSHARP_HL_extensions[] = {".cs", ".csx", NULL};
+char *CSHARP_HL_extensions[] = { ".cs", NULL };
 char *CSHARP_HL_keywords[] = {
-    /* C# Keywords */
-    "abstract", "as", "base", "bool", "break", "byte", "case", "catch", "char",
-    "checked", "class", "const", "continue", "decimal", "default", "delegate",
-    "do", "double", "else", "enum", "event", "explicit", "extern", "false",
-    "finally", "fixed", "float", "for", "foreach", "goto", "if", "implicit",
-    "in", "int", "interface", "internal", "is", "lock", "long", "namespace",
-    "new", "null", "object", "operator", "out", "override", "params", "private",
-    "protected", "public", "readonly", "ref", "return", "sbyte", "sealed",
-    "short", "sizeof", "stackalloc", "static", "string", "struct", "switch",
-    "this", "throw", "true", "try", "typeof", "uint", "ulong", "unchecked",
-    "unsafe", "ushort", "using", "virtual", "void", "volatile", "while",
-    "async", "await", "var", "dynamic", "yield", "where", "when", "nameof",
+    "abstract","as","base","break","case","catch","checked","class","const",
+    "continue","default","delegate","do","else","enum","event","explicit",
+    "extern","false","finally","fixed","for","foreach","goto","if","implicit",
+    "in","interface","internal","is","lock","namespace","new","null",
+    "operator","out","override","params","private","protected","public",
+    "readonly","ref","return","sealed","sizeof","stackalloc","static",
+    "struct","switch","this","throw","true","try","typeof","unchecked",
+    "unsafe","using","virtual","volatile","while","async","await","var",
+    "dynamic","yield","where","when","nameof",
+    "bool|","byte|","char|","decimal|","double|","float|","int|","long|",
+    "object|","sbyte|","short|","string|","uint|","ulong|","ushort|","void|",
+    "String|","Object|","List|","Dictionary|","Array|","Task|","Exception|", NULL
+};
 
-    /* C# Types */
-    "String|", "Object|", "Int32|", "Boolean|", "Double|", "DateTime|", "List|",
-    "Dictionary|", "Array|", "IEnumerable|", "ICollection|", "IList|", "Task|",
-    "Exception|", "ArgumentException|", "NullReferenceException|", NULL};
-
-/* PHP */
-char *PHP_HL_extensions[] = {".php", ".phtml", ".php3", ".php4", ".php5", ".phps", NULL};
+char *PHP_HL_extensions[] = { ".php", ".phtml", NULL };
 char *PHP_HL_keywords[] = {
-    /* PHP Keywords */
-    "abstract", "and", "array", "as", "break", "callable", "case", "catch",
-    "class", "clone", "const", "continue", "declare", "default", "die", "do",
-    "echo", "else", "elseif", "empty", "enddeclare", "endfor", "endforeach",
-    "endif", "endswitch", "endwhile", "eval", "exit", "extends", "final",
-    "finally", "for", "foreach", "function", "global", "goto", "if", "implements",
-    "include", "include_once", "instanceof", "insteadof", "interface", "isset",
-    "list", "namespace", "new", "or", "print", "private", "protected", "public",
-    "require", "require_once", "return", "static", "switch", "throw", "trait",
-    "try", "unset", "use", "var", "while", "xor", "yield", "true", "false", "null",
+    "abstract","and","array","as","break","callable","case","catch","class",
+    "clone","const","continue","declare","default","die","do","echo","else",
+    "elseif","empty","enddeclare","endfor","endforeach","endif","endswitch",
+    "endwhile","eval","exit","extends","final","finally","for","foreach",
+    "function","global","goto","if","implements","include","include_once",
+    "instanceof","insteadof","interface","isset","list","namespace","new",
+    "or","print","private","protected","public","require","require_once",
+    "return","static","switch","throw","trait","try","unset","use","var",
+    "while","xor","yield","true","false","null",
+    "$_GET|","$_POST|","$_SESSION|","$_COOKIE|","$_SERVER|","strlen|",
+    "substr|","strpos|","explode|","implode|","count|","isset|","empty|",
+    "echo|","print|","var_dump|", NULL
+};
 
-    /* PHP Built-ins */
-    "$_GET|", "$_POST|", "$_SESSION|", "$_COOKIE|", "$_SERVER|", "$_FILES|",
-    "$_ENV|", "$_REQUEST|", "$GLOBALS|", "strlen|", "substr|", "strpos|",
-    "explode|", "implode|", "array_merge|", "array_push|", "array_pop|",
-    "count|", "sizeof|", "is_array|", "is_string|", "is_numeric|", "empty|",
-    "isset|", "unset|", "die|", "exit|", "echo|", "print|", "var_dump|", NULL};
-
-/* Ruby */
-char *RUBY_HL_extensions[] = {".rb", ".rbw", ".rake", ".gemspec", NULL};
+char *RUBY_HL_extensions[] = { ".rb", ".rake", NULL };
 char *RUBY_HL_keywords[] = {
-    /* Ruby Keywords */
-    "alias", "and", "begin", "break", "case", "class", "def", "defined", "do",
-    "else", "elsif", "end", "ensure", "false", "for", "if", "in", "module",
-    "next", "nil", "not", "or", "redo", "rescue", "retry", "return", "self",
-    "super", "then", "true", "undef", "unless", "until", "when", "while", "yield",
-    "require", "include", "extend", "attr_reader", "attr_writer", "attr_accessor",
+    "alias","and","begin","break","case","class","def","defined","do",
+    "else","elsif","end","ensure","false","for","if","in","module",
+    "next","nil","not","or","redo","rescue","retry","return","self",
+    "super","then","true","undef","unless","until","when","while","yield",
+    "require","include","extend","attr_reader","attr_writer","attr_accessor",
+    "puts|","print|","p|","gets|","chomp|","length|","size|",
+    "each|","map|","select|","reject|","find|","inject|","reduce|",
+    "Array|","Hash|","String|","Integer|","Float|","Symbol|", NULL
+};
 
-    /* Ruby Built-ins */
-    "puts|", "print|", "p|", "gets|", "chomp|", "strip|", "length|", "size|",
-    "empty|", "nil|", "class|", "new|", "initialize|", "to_s|", "to_i|", "to_f|",
-    "to_a|", "each|", "map|", "select|", "reject|", "find|", "inject|", "reduce|",
-    "Array|", "Hash|", "String|", "Integer|", "Float|", "Symbol|", "Proc|",
-    "Lambda|", "Method|", "Class|", "Module|", "Object|", "Kernel|", NULL};
-
-/* Swift */
-char *SWIFT_HL_extensions[] = {".swift", NULL};
+char *SWIFT_HL_extensions[] = { ".swift", NULL };
 char *SWIFT_HL_keywords[] = {
-    /* Swift Keywords */
-    "associatedtype", "class", "deinit", "enum", "extension", "fileprivate", "func",
-    "import", "init", "inout", "internal", "let", "open", "operator", "private",
-    "protocol", "public", "static", "struct", "subscript", "typealias", "var",
-    "break", "case", "continue", "default", "defer", "do", "else", "fallthrough",
-    "for", "guard", "if", "in", "repeat", "return", "switch", "where", "while",
-    "as", "catch", "false", "is", "nil", "rethrows", "super", "self", "Self",
-    "throw", "throws", "true", "try", "async", "await", "some", "any",
+    "associatedtype","class","deinit","enum","extension","fileprivate","func",
+    "import","init","inout","internal","let","open","operator","private",
+    "protocol","public","static","struct","subscript","typealias","var",
+    "break","case","continue","default","defer","do","else","fallthrough",
+    "for","guard","if","in","repeat","return","switch","where","while",
+    "as","catch","false","is","nil","rethrows","super","self","Self",
+    "throw","throws","true","try","async","await","some","any",
+    "Int|","Double|","Float|","Bool|","String|","Character|","Array|",
+    "Dictionary|","Set|","Optional|","Result|","Error|", NULL
+};
 
-    /* Swift Types */
-    "Int|", "Double|", "Float|", "Bool|", "String|", "Character|", "Array|",
-    "Dictionary|", "Set|", "Optional|", "Result|", "Error|", "AnyObject|",
-    "AnyClass|", "Protocol|", "Codable|", "Hashable|", "Equatable|",
-    "Comparable|", "Collection|", "Sequence|", NULL};
-
-/* SQL */
-char *SQL_HL_extensions[] = {".sql", ".ddl", ".dml", NULL};
-char *SQL_HL_keywords[] = {
-    /* SQL Keywords */
-    "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
-    "ALTER", "TABLE", "INDEX", "VIEW", "DATABASE", "SCHEMA", "COLUMN", "PRIMARY",
-    "FOREIGN", "KEY", "REFERENCES", "CONSTRAINT", "UNIQUE", "NOT", "NULL", "DEFAULT",
-    "AUTO_INCREMENT", "IDENTITY", "SERIAL", "BOOLEAN", "TINYINT", "SMALLINT",
-    "MEDIUMINT", "INT", "INTEGER", "BIGINT", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE",
-    "REAL", "BIT", "DATE", "TIME", "DATETIME", "TIMESTAMP", "YEAR", "CHAR", "VARCHAR",
-    "BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB", "TINYTEXT",
-    "TEXT", "MEDIUMTEXT", "LONGTEXT", "ENUM", "SET", "JSON", "GEOMETRY", "POINT",
-    "LINESTRING", "POLYGON", "MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON",
-    "GEOMETRYCOLLECTION", "AND", "OR", "IN", "BETWEEN", "LIKE", "IS", "EXISTS",
-    "ANY", "ALL", "SOME", "UNION", "INTERSECT", "EXCEPT", "INNER", "LEFT", "RIGHT",
-    "FULL", "OUTER", "JOIN", "ON", "USING", "GROUP", "BY", "HAVING", "ORDER", "ASC",
-    "DESC", "LIMIT", "OFFSET", "DISTINCT", "AS", "CASE", "WHEN", "THEN", "ELSE", "END",
-    "IF", "IFNULL", "ISNULL", "COALESCE", "NULLIF", "CAST", "CONVERT", "SUBSTRING",
-    "LENGTH", "UPPER", "LOWER", "TRIM", "LTRIM", "RTRIM", "REPLACE", "CONCAT",
-    "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "NOW", "COUNT", "SUM",
-    "AVG", "MIN", "MAX", "STDDEV", "VARIANCE", "BEGIN", "COMMIT", "ROLLBACK",
-    "TRANSACTION", "SAVEPOINT", "GRANT", "REVOKE", "LOCK", "UNLOCK",
-
-    /* SQL Functions and Operators */
-    "TRUE|", "FALSE|", "UNKNOWN|", NULL};
-
-/* Rust */
-char *RUST_HL_extensions[] = {".rs", ".rlib", NULL};
+char *RUST_HL_extensions[] = { ".rs", NULL };
 char *RUST_HL_keywords[] = {
-    /* Rust Keywords */
-    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else",
-    "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop",
-    "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static",
-    "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while",
-    "abstract", "become", "box", "do", "final", "macro", "override", "priv",
-    "typeof", "unsized", "virtual", "yield", "try", "union", "catch", "default",
+    "as","async","await","break","const","continue","crate","dyn","else",
+    "enum","extern","false","fn","for","if","impl","in","let","loop",
+    "match","mod","move","mut","pub","ref","return","self","Self","static",
+    "struct","super","trait","true","type","unsafe","use","where","while",
+    "i8|","i16|","i32|","i64|","i128|","isize|","u8|","u16|","u32|","u64|",
+    "u128|","usize|","f32|","f64|","bool|","char|","str|","String|","Vec|",
+    "HashMap|","HashSet|","Option|","Result|","Box|","Rc|","Arc|", NULL
+};
 
-    /* Rust Types */
-    "i8|", "i16|", "i32|", "i64|", "i128|", "isize|", "u8|", "u16|", "u32|", "u64|",
-    "u128|", "usize|", "f32|", "f64|", "bool|", "char|", "str|", "String|", "Vec|",
-    "HashMap|", "HashSet|", "BTreeMap|", "BTreeSet|", "Option|", "Result|", "Box|",
-    "Rc|", "Arc|", "RefCell|", "Cell|", "Mutex|", "RwLock|", "thread|", "Clone|",
-    "Copy|", "Send|", "Sync|", "Drop|", "Display|", "Debug|", "Default|", "PartialEq|",
-    "Eq|", "PartialOrd|", "Ord|", "Hash|", "Iterator|", "IntoIterator|", NULL};
+char *SQL_HL_extensions[] = { ".sql", ".ddl", ".dml", NULL };
+char *SQL_HL_keywords[] = {
+    "SELECT","FROM","WHERE","INSERT","UPDATE","DELETE","CREATE","DROP","ALTER",
+    "TABLE","INDEX","VIEW","DATABASE","SCHEMA","PRIMARY","FOREIGN","KEY",
+    "REFERENCES","CONSTRAINT","UNIQUE","NOT","NULL","DEFAULT","AND","OR","IN",
+    "BETWEEN","LIKE","IS","EXISTS","ANY","ALL","UNION","INNER","LEFT","RIGHT",
+    "FULL","OUTER","JOIN","ON","GROUP","BY","HAVING","ORDER","ASC","DESC",
+    "LIMIT","OFFSET","DISTINCT","AS","CASE","WHEN","THEN","ELSE","END",
+    "BEGIN","COMMIT","ROLLBACK","TRANSACTION","COUNT","SUM","AVG","MIN","MAX",
+    "INT|","INTEGER|","BIGINT|","VARCHAR|","TEXT|","BOOLEAN|","FLOAT|",
+    "DOUBLE|","DECIMAL|","DATE|","TIMESTAMP|","TRUE|","FALSE|", NULL
+};
 
-/* Dart */
-char *DART_HL_extensions[] = {".dart", NULL};
+char *DART_HL_extensions[] = { ".dart", NULL };
 char *DART_HL_keywords[] = {
-    /* Dart Keywords */
-    "abstract", "as", "assert", "async", "await", "break", "case", "catch", "class",
-    "const", "continue", "covariant", "default", "deferred", "do", "dynamic", "else",
-    "enum", "export", "extends", "extension", "external", "factory", "false", "final",
-    "finally", "for", "Function", "get", "hide", "if", "implements", "import", "in",
-    "interface", "is", "late", "library", "mixin", "new", "null", "on", "operator",
-    "part", "required", "rethrow", "return", "set", "show", "static", "super", "switch",
-    "sync", "this", "throw", "true", "try", "typedef", "var", "void", "while", "with",
-    "yield",
+    "abstract","as","assert","async","await","break","case","catch","class",
+    "const","continue","covariant","default","deferred","do","dynamic","else",
+    "enum","export","extends","extension","external","factory","false","final",
+    "finally","for","get","hide","if","implements","import","in","interface",
+    "is","late","library","mixin","new","null","on","operator","part",
+    "required","rethrow","return","set","show","static","super","switch",
+    "sync","this","throw","true","try","typedef","var","void","while",
+    "with","yield",
+    "int|","double|","num|","String|","bool|","List|","Map|","Set|",
+    "Future|","Stream|","Object|","dynamic|", NULL
+};
 
-    /* Dart Types */
-    "int|", "double|", "num|", "String|", "bool|", "List|", "Map|", "Set|", "Object|",
-    "dynamic|", "var|", "void|", "Future|", "Stream|", "Iterable|", "Iterator|",
-    "Comparable|", "Duration|", "DateTime|", "Uri|", "RegExp|", "StringBuffer|",
-    "Symbol|", "Type|", "Function|", "Null|", NULL};
-
-/* Shell */
 char *SHELL_HL_extensions[] = {
-    ".sh", ".bash", ".zsh", ".ksh", ".csh", ".tcsh",
-    ".profile", ".bashrc", ".bash_profile", ".bash_login",
-    ".zshrc", ".zshenv", ".zlogin", ".zprofile",
-    NULL};
-
+    ".sh", ".bash", ".zsh", ".ksh",
+    ".bashrc", ".bash_profile", ".zshrc", ".zshenv", NULL
+};
 char *SHELL_HL_keywords[] = {
-    /* Shell Keywords */
-    "if", "then", "else", "elif", "fi", "case", "esac", "for", "while",
-    "until", "do", "done", "select", "function", "in", "time", "coproc",
+    "if","then","else","elif","fi","case","esac","for","while",
+    "until","do","done","select","function","in","time",
+    "alias|","bg|","break|","builtin|","cd|","command|","continue|","declare|",
+    "echo|","eval|","exec|","exit|","export|","fg|","getopts|","hash|",
+    "history|","jobs|","kill|","let|","local|","printf|","pwd|","read|",
+    "readonly|","return|","set|","shift|","source|","test|","trap|",
+    "true|","type|","typeset|","ulimit|","umask|","unset|","wait|",
+    "awk|","cat|","chmod|","chown|","cp|","curl|","cut|","date|",
+    "df|","diff|","du|","find|","grep|","head|","ln|","ls|",
+    "mkdir|","mv|","ps|","rm|","sed|","ssh|","sudo|","tail|",
+    "tar|","touch|","tr|","uniq|","wc|","wget|","which|","xargs|",
+    "$HOME|","$PATH|","$PWD|","$USER|","$SHELL|","$IFS|",
+    "$OLDPWD|","$PPID|","$RANDOM|","$SECONDS|","$LINENO|", NULL
+};
 
-    /* Common commands */
-    "alias|", "bg|", "bind|", "break|", "builtin|", "caller|", "cd|",
-    "command|", "compgen|", "complete|", "continue|", "declare|",
-    "dirs|", "disown|", "echo|", "enable|", "eval|", "exec|", "exit|",
-    "export|", "false|", "fc|", "fg|", "getopts|", "hash|", "help|",
-    "history|", "jobs|", "kill|", "let|", "local|", "logout|", "mapfile|",
-    "popd|", "printf|", "pushd|", "pwd|", "read|", "readarray|",
-    "readonly|", "return|", "set|", "shift|", "shopt|", "source|",
-    "suspend|", "test|", "times|", "trap|", "true|", "type|", "typeset|",
-    "ulimit|", "umask|", "unalias|", "unset|", "wait|",
-
-    /* System utilities */
-    "awk|", "cat|", "chmod|", "chown|", "cp|", "curl|", "cut|", "date|",
-    "df|", "diff|", "dig|", "du|", "find|", "grep|", "head|", "ln|", "ls|",
-    "mkdir|", "mv|", "ping|", "ps|", "rm|", "rsync|", "scp|", "sed|",
-    "ssh|", "sudo|", "tail|", "tar|", "top|", "touch|", "tr|", "uniq|",
-    "wc|", "wget|", "which|", "xargs|",
-
-    /* Special variables */
-    "$BASH|", "$BASHOPTS|", "$BASHPID|", "$BASH_ALIASES|",
-    "$BASH_ARGC|", "$BASH_ARGV|", "$BASH_CMDS|", "$BASH_COMMAND|",
-    "$BASH_ENV|", "$BASH_LINENO|", "$BASH_SOURCE|", "$BASH_SUBSHELL|",
-    "$BASH_VERSION|", "$DIRSTACK|", "$EUID|", "$FUNCNAME|",
-    "$GROUPS|", "$HOME|", "$HOSTNAME|", "$HOSTTYPE|", "$IFS|",
-    "$LINENO|", "$MACHTYPE|", "$OLDPWD|", "$OPTARG|", "$OPTIND|",
-    "$OSTYPE|", "$PATH|", "$PIPESTATUS|", "$PPID|", "$PS1|",
-    "$PS2|", "$PS3|", "$PS4|", "$PWD|", "$RANDOM|", "$REPLY|",
-    "$SECONDS|", "$SHELL|", "$SHELLOPTS|", "$SHLVL|", "$UID|",
-    NULL};
-
-/* HTML */
-char *HTML_HL_extensions[] = {".html", ".htm", ".xhtml", NULL};
+char *HTML_HL_extensions[] = { ".html", ".htm", ".xhtml", NULL };
 char *HTML_HL_keywords[] = {
-    /* Opening tags */
-    "<a>", "<abbr>", "<address>", "<area>", "<article>", "<aside>", "<audio>",
-    "<b>", "<base>", "<bdi>", "<bdo>", "<blockquote>", "<body>", "<br>", "<button>",
-    "<canvas>", "<caption>", "<cite>", "<code>", "<col>", "<colgroup>",
-    "<data>", "<datalist>", "<dd>", "<del>", "<details>", "<dfn>", "<dialog>",
-    "<div>", "<dl>", "<dt>", "<em>", "<embed>",
-    "<fieldset>", "<figcaption>", "<figure>", "<footer>", "<form>",
-    "<h1>", "<h2>", "<h3>", "<h4>", "<h5>", "<h6>", "<head>", "<header>", "<hr>", "<html>",
-    "<i>", "<iframe>", "<img>", "<input>", "<ins>",
-    "<kbd>", "<label>", "<legend>", "<li>", "<link>",
-    "<main>", "<map>", "<mark>", "<meta>", "<meter>",
-    "<nav>", "<noscript>",
-    "<object>", "<ol>", "<optgroup>", "<option>", "<output>",
-    "<p>", "<param>", "<picture>", "<pre>", "<progress>",
-    "<q>", "<rp>", "<rt>", "<ruby>",
-    "<s>", "<samp>", "<script>", "<section>", "<select>", "<small>", "<source>",
-    "<span>", "<strong>", "<style>", "<sub>", "<summary>", "<sup>", "<svg>",
-    "<table>", "<tbody>", "<td>", "<template>", "<textarea>", "<tfoot>", "<th>", "<thead>",
-    "<time>", "<title>", "<tr>", "<track>",
-    "<u>", "<ul>",
-    "<var>", "<video>",
-    "<wbr>",
+    "<a>","<abbr>","<address>","<article>","<aside>","<audio>",
+    "<b>","<blockquote>","<body>","<br>","<button>",
+    "<canvas>","<caption>","<cite>","<code>","<colgroup>",
+    "<data>","<datalist>","<dd>","<del>","<details>","<dfn>","<dialog>",
+    "<div>","<dl>","<dt>","<em>","<embed>",
+    "<fieldset>","<figcaption>","<figure>","<footer>","<form>",
+    "<h1>","<h2>","<h3>","<h4>","<h5>","<h6>",
+    "<head>","<header>","<hr>","<html>",
+    "<i>","<iframe>","<img>","<input>","<ins>",
+    "<label>","<legend>","<li>","<link>",
+    "<main>","<map>","<mark>","<meta>","<meter>",
+    "<nav>","<noscript>","<object>","<ol>","<option>","<output>",
+    "<p>","<picture>","<pre>","<progress>","<q>",
+    "<s>","<script>","<section>","<select>","<small>","<source>",
+    "<span>","<strong>","<style>","<sub>","<summary>","<sup>","<svg>",
+    "<table>","<tbody>","<td>","<template>","<textarea>",
+    "<tfoot>","<th>","<thead>","<time>","<title>","<tr>",
+    "<u>","<ul>","<var>","<video>","<wbr>",
+    "</a>","</article>","</aside>","</audio>","</b>","</blockquote>",
+    "</body>","</button>","</canvas>","</caption>","</cite>","</code>",
+    "</div>","</em>","</fieldset>","</figcaption>","</figure>",
+    "</footer>","</form>","</h1>","</h2>","</h3>","</h4>","</h5>","</h6>",
+    "</head>","</header>","</html>","</i>","</iframe>","</ins>",
+    "</label>","</legend>","</li>","</main>","</mark>","</meter>",
+    "</nav>","</noscript>","</object>","</ol>","</option>","</output>",
+    "</p>","</picture>","</pre>","</progress>","</q>","</s>",
+    "</script>","</section>","</select>","</small>","</span>","</strong>",
+    "</style>","</sub>","</summary>","</sup>","</svg>","</table>",
+    "</tbody>","</td>","</template>","</textarea>","</tfoot>",
+    "</th>","</thead>","</time>","</title>","</tr>","</u>","</ul>",
+    "</var>","</video>",
+    "<!DOCTYPE>", NULL
+};
 
-    /* Closing tags */
-    "</a>", "</abbr>", "</address>", "</article>", "</aside>", "</audio>",
-    "</b>", "</bdi>", "</bdo>", "</blockquote>", "</body>", "</button>",
-    "</canvas>", "</caption>", "</cite>", "</code>", "</colgroup>",
-    "</data>", "</datalist>", "</dd>", "</del>", "</details>", "</dfn>", "</dialog>",
-    "</div>", "</dl>", "</dt>", "</em>",
-    "</fieldset>", "</figcaption>", "</figure>", "</footer>", "</form>",
-    "</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "</head>", "</header>", "</html>",
-    "</i>", "</iframe>", "</ins>",
-    "</kbd>", "</label>", "</legend>", "</li>",
-    "</main>", "</map>", "</mark>", "</meter>",
-    "</nav>", "</noscript>",
-    "</object>", "</ol>", "</optgroup>", "</option>", "</output>",
-    "</p>", "</picture>", "</pre>", "</progress>",
-    "</q>", "</rp>", "</rt>", "</ruby>",
-    "</s>", "</samp>", "</script>", "</section>", "</select>", "</small>",
-    "</span>", "</strong>", "</style>", "</sub>", "</summary>", "</sup>", "</svg>",
-    "</table>", "</tbody>", "</td>", "</template>", "</textarea>", "</tfoot>", "</th>", "</thead>",
-    "</time>", "</title>", "</tr>",
-    "</u>", "</ul>",
-    "</var>", "</video>",
+char *JSX_HL_extensions[] = { ".jsx", ".tsx", NULL };
+char *JSX_HL_keywords[] = {
+    "break","case","catch","class","const","continue","default","delete",
+    "do","else","export","extends","finally","for","function","if","import",
+    "in","instanceof","let","new","return","super","switch","this","throw",
+    "try","typeof","var","void","while","yield","async","await","of",
+    "true","false","null","undefined",
+    "interface","type","enum","declare","abstract","implements",
+    "private","protected","public","readonly","static","as","keyof",
+    "Component|","PureComponent|","memo|","Fragment|","Suspense|","lazy|",
+    "useState|","useEffect|","useContext|","useReducer|","useCallback|",
+    "useMemo|","useRef|","useLayoutEffect|",
+    "createContext|","createElement|","ReactDOM|",
+    "onClick|","onChange|","onSubmit|","onKeyDown|","onKeyUp|",
+    "onFocus|","onBlur|","onMouseOver|","onMouseLeave|",
+    "className|","htmlFor|",
+    "string|","number|","boolean|","any|","void|","never|","Array|","Promise|", NULL
+};
 
-    /* Self-closing/void elements */
-    "<area/>", "<base/>", "<br/>", "<col/>", "<embed/>", "<hr/>", "<img/>", "<input/>",
-    "<link/>", "<meta/>", "<param/>", "<source/>", "<track/>", "<wbr/>",
-
-    /* Doctype */
-    "<!DOCTYPE>",
-    NULL};
-
-/* React (JSX) */
-char *REACT_HL_extensions[] = {".jsx", ".tsx", NULL};
-char *REACT_HL_keywords[] = {
-    /* React Components */
-    "Component|", "PureComponent|", "memo|", "Fragment|", "StrictMode|", "Suspense|",
-    "lazy|", "Profiler|", "Children|", "createRef|", "forwardRef|",
-
-    /* React Hooks */
-    "useState|", "useEffect|", "useContext|", "useReducer|", "useCallback|",
-    "useMemo|", "useRef|", "useImperativeHandle|", "useLayoutEffect|",
-    "useDebugValue|",
-
-    /* React APIs */
-    "createContext|", "createElement|", "cloneElement|", "createFactory|",
-    "isValidElement|", "ReactDOM|", "ReactDOMServer|",
-
-    /* React Events */
-    "onClick|", "onContextMenu|", "onDoubleClick|", "onDrag|", "onDragEnd|",
-    "onDragEnter|", "onDragExit|", "onDragLeave|", "onDragOver|", "onDragStart|",
-    "onDrop|", "onMouseDown|", "onMouseEnter|", "onMouseLeave|", "onMouseMove|",
-    "onMouseOut|", "onMouseOver|", "onMouseUp|", "onSelect|", "onTouchCancel|",
-    "onTouchEnd|", "onTouchMove|", "onTouchStart|", "onScroll|", "onWheel|",
-    "onCopy|", "onCut|", "onPaste|", "onKeyDown|", "onKeyPress|", "onKeyUp|",
-    "onFocus|", "onBlur|", "onChange|", "onInput|", "onInvalid|", "onSubmit|",
-
-    /* JSX-specific */
-    "className|", "htmlFor|", "dangerouslySetInnerHTML|",
-    NULL};
-
-/* Vue.js */
-char *VUE_HL_extensions[] = {".vue", NULL};
+char *VUE_HL_extensions[] = { ".vue", NULL };
 char *VUE_HL_keywords[] = {
-    /* Vue Directives */
-    "v-text|", "v-html|", "v-show|", "v-if|", "v-else|", "v-else-if|", "v-for|",
-    "v-on|", "v-bind|", "v-model|", "v-slot|", "v-pre|", "v-cloak|", "v-once|",
+    "v-text|","v-html|","v-show|","v-if|","v-else|","v-else-if|","v-for|",
+    "v-on|","v-bind|","v-model|","v-slot|","v-pre|","v-cloak|","v-once|",
+    "@click|","@input|","@change|","@submit|","@keydown|","@keyup|",
+    "@focus|","@blur|","@scroll|","@load|",
+    ":key|",":class|",":style|",":ref|",":is|",
+    "data|","props|","computed|","methods|","watch|","components|",
+    "beforeCreate|","created|","beforeMount|","mounted|",
+    "beforeUpdate|","updated|","beforeDestroy|","destroyed|",
+    "template|","render|","name|","provide|","inject|",
+    "$route|","$router|","router-link|","router-view|", NULL
+};
 
-    /* Vue Events */
-    "@click|", "@input|", "@change|", "@submit|", "@keydown|", "@keyup|", "@mouseover|",
-    "@mousemove|", "@mouseleave|", "@focus|", "@blur|", "@scroll|", "@load|",
-
-    /* Vue Special Attributes */
-    ":key|", ":class|", ":style|", ":ref|", ":is|", ":slot|", ":props|",
-
-    /* Vue Options */
-    "data|", "props|", "computed|", "methods|", "watch|", "components|", "filters|",
-    "directives|", "mixins|", "extends|", "provide|", "inject|", "template|",
-    "render|", "el|", "name|", "functional|", "model|", "propsData|",
-
-    /* Vue Lifecycle Hooks */
-    "beforeCreate|", "created|", "beforeMount|", "mounted|", "beforeUpdate|",
-    "updated|", "activated|", "deactivated|", "beforeDestroy|", "destroyed|",
-    "errorCaptured|", "serverPrefetch|",
-
-    /* Vue API */
-    "Vue.directive|", "Vue.filter|", "Vue.component|", "Vue.mixin|",
-    "Vue.use|", "Vue.extend|", "Vue.set|", "Vue.delete|", "Vue.nextTick|",
-    "Vue.observable|", "Vue.version|",
-
-    /* Vue Router */
-    "router-link|", "router-view|", "$route|", "$router|",
-    NULL};
-
-/* Angular */
-char *ANGULAR_HL_extensions[] = {".component.ts", NULL};
-char *ANGULAR_HL_keywords[] = {
-    /* Angular Decorators */
-    "@Component|", "@Directive|", "@Pipe|", "@Injectable|", "@NgModule|",
-    "@Input|", "@Output|", "@HostBinding|", "@HostListener|", "@ViewChild|",
-    "@ViewChildren|", "@ContentChild|", "@ContentChildren|",
-
-    /* Angular Directives */
-    "*ngIf|", "*ngFor|", "*ngSwitch|", "*ngSwitchCase|", "*ngSwitchDefault|",
-    "[ngClass]|", "[ngStyle]|", "[ngModel]|", "[ngTemplateOutlet]|",
-    "ng-template|", "ng-container|", "ng-content|",
-
-    /* Angular Lifecycle Hooks */
-    "ngOnChanges|", "ngOnInit|", "ngDoCheck|", "ngAfterContentInit|",
-    "ngAfterContentChecked|", "ngAfterViewInit|", "ngAfterViewChecked|",
-    "ngOnDestroy|",
-
-    /* Angular Services */
-    "HttpClient|", "HttpHandler|", "HttpInterceptor|", "HttpClientModule|",
-    "Router|", "ActivatedRoute|", "RouterModule|", "Location|",
-
-    /* Angular Pipes */
-    "async|", "date|", "currency|", "decimal|", "percent|", "json|", "lowercase|",
-    "uppercase|", "titlecase|", "slice|", "i18nSelect|", "i18nPlural|",
-
-    /* Angular Forms */
-    "FormGroup|", "FormControl|", "FormArray|", "FormBuilder|", "Validators|",
-    "ReactiveFormsModule|", "FormsModule|",
-
-    /* Angular Testing */
-    "TestBed|", "ComponentFixture|", "fakeAsync|", "tick|", "async|", "inject|",
-    NULL};
-
-/* Svelte */
-char *SVELTE_HL_extensions[] = {".svelte", NULL};
+char *SVELTE_HL_extensions[] = { ".svelte", NULL };
 char *SVELTE_HL_keywords[] = {
-    /* Svelte Directives */
-    "on:|", "bind:|", "class:|", "use:|", "transition:|", "in:|", "out:|",
-    "animate:|", "let:|", "export|", "as|", "in|", "out|", "animate|",
+    "if","else","each","await","then","catch","as","in",
+    "on:|","bind:|","class:|","use:|","transition:|","in:|","out:|","animate:|",
+    "writable|","readable|","derived|","get|","subscribe|","set|","update|",
+    "onMount|","onDestroy|","beforeUpdate|","afterUpdate|","tick|",
+    "createEventDispatcher|","getContext|","setContext|",
+    "svelte:self|","svelte:component|","svelte:window|",
+    "svelte:body|","svelte:head|","svelte:options|", NULL
+};
 
-    /* Svelte Events */
-    "onclick|", "oninput|", "onchange|", "onsubmit|", "onkeydown|", "onkeyup|",
-    "onmouseover|", "onmousemove|", "onmouseleave|", "onfocus|", "onblur|",
-    "onscroll|", "onload|",
-
-    /* Svelte Actions */
-    "use:action|", "use:enhance|",
-
-    /* Svelte Transitions */
-    "transition:fade|", "transition:slide|", "transition:blur|", "transition:fly|",
-    "transition:scale|", "transition:draw|", "transition:crossfade|",
-
-    /* Svelte Stores */
-    "writable|", "readable|", "derived|", "get|", "subscribe|", "set|", "update|",
-
-    /* Svelte Special Elements */
-    "svelte:self|", "svelte:component|", "svelte:window|", "svelte:body|",
-    "svelte:head|", "svelte:options|",
-
-    /* Svelte Runtime */
-    "beforeUpdate|", "afterUpdate|", "onMount|", "onDestroy|", "tick|",
-    "createEventDispatcher|", "getContext|", "setContext|", "hasContext|",
-    "all|", "setTimeout|", "setInterval|", "requestAnimationFrame|",
-    NULL};
-
-/* Here we define an array of syntax highlights by extensions, keywords,
- * comments delimiters and flags. */
 struct editorSyntax HLDB[] = {
-    {/* C / C++ */
-     C_HL_extensions,
-     C_HL_keywords,
-     "//", "/*", "*/",
-     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-    {/* Python */
-     PYTHON_HL_extensions,
-     PYTHON_HL_keywords,
-     "#", "", "",
-     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-    {/* Java */
-     JAVA_HL_extensions,
-     JAVA_HL_keywords,
-     "//", "/*", "*/",
-     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-    {/* JavaScript */
-     JS_HL_extensions,
-     JS_HL_keywords,
-     "//", "/*", "*/",
-     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-    {/* TypeScript */
-     TS_HL_extensions,
-     TS_HL_keywords,
-     "//", "/*", "*/",
-     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-    {/* C# */
-     CSHARP_HL_extensions,
-     CSHARP_HL_keywords,
-     "//", "/*", "*/",
-     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-    {/* PHP */
-     PHP_HL_extensions,
-     PHP_HL_keywords,
-     "//", "/*", "*/",
-     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-    {/* Ruby */
-     RUBY_HL_extensions,
-     RUBY_HL_keywords,
-     "#", "", "",
-     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-    {/* Swift */
-     SWIFT_HL_extensions,
-     SWIFT_HL_keywords,
-     "//", "/*", "*/",
-     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-    {/* SQL */
-     SQL_HL_extensions,
-     SQL_HL_keywords,
-     "--", "/*", "*/",
-     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-    {/* Rust */
-     RUST_HL_extensions,
-     RUST_HL_keywords,
-     "//", "/*", "*/",
-     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-    {/* Dart */
-     DART_HL_extensions,
-     DART_HL_keywords,
-     "//", "/*", "*/",
-     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-    {/* Shell */
-     SHELL_HL_extensions,
-     SHELL_HL_keywords,
-     "#", "", "",
-     HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-
-    /* HTML */
-    {
-        HTML_HL_extensions,
-        HTML_HL_keywords,
-        "<!--",
-        "",
-        "-->",
-        HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-
-    /* React */
-    {
-        REACT_HL_extensions,
-        REACT_HL_keywords,
-        "//", "/*", "*/",
-        HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-
-    /* Vue */
-    {
-        VUE_HL_extensions,
-        VUE_HL_keywords,
-        "<!--", "", "-->",
-        HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-
-    /* Angular */
-    {
-        ANGULAR_HL_extensions,
-        ANGULAR_HL_keywords,
-        "//", "/*", "*/",
-        HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS},
-
-    /* Svelte */
-    {
-        SVELTE_HL_extensions,
-        SVELTE_HL_keywords,
-        "<!--", "", "-->",
-        HL_HIGHLIGHT_STRINGS | HL_HIGHLIGHT_NUMBERS}
-
+    { "c",      C_HL_extensions,    C_HL_keywords,    "//", "/*", "*/",  HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS },
+    { "python", PYTHON_HL_extensions, PYTHON_HL_keywords, "#", "", "",   HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS },
+    { "java",   JAVA_HL_extensions,  JAVA_HL_keywords,  "//", "/*", "*/", HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS },
+    { "js",     JS_HL_extensions,    JS_HL_keywords,    "//", "/*", "*/", HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS },
+    { "ts",     TS_HL_extensions,    TS_HL_keywords,    "//", "/*", "*/", HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS },
+    { "csharp", CSHARP_HL_extensions, CSHARP_HL_keywords,"//","/*", "*/", HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS },
+    { "php",    PHP_HL_extensions,   PHP_HL_keywords,   "//", "/*", "*/", HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS },
+    { "ruby",   RUBY_HL_extensions,  RUBY_HL_keywords,  "#",  "", "",    HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS },
+    { "swift",  SWIFT_HL_extensions, SWIFT_HL_keywords, "//", "/*", "*/", HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS },
+    { "rust",   RUST_HL_extensions,  RUST_HL_keywords,  "//", "/*", "*/", HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS },
+    { "sql",    SQL_HL_extensions,   SQL_HL_keywords,   "--", "/*", "*/", HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS },
+    { "dart",   DART_HL_extensions,  DART_HL_keywords,  "//", "/*", "*/", HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS },
+    { "shell",  SHELL_HL_extensions, SHELL_HL_keywords, "#",  "", "",    HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS },
+    { "html",   HTML_HL_extensions,  HTML_HL_keywords,  "", "", "",      HL_HIGHLIGHT_STRINGS },
+    { "jsx",    JSX_HL_extensions,   JSX_HL_keywords,   "//", "/*", "*/", HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS },
+    { "vue",    VUE_HL_extensions,   VUE_HL_keywords,   "", "", "",      HL_HIGHLIGHT_STRINGS },
+    { "svelte", SVELTE_HL_extensions, SVELTE_HL_keywords, "", "", "",    HL_HIGHLIGHT_STRINGS },
 };
 
 #define HLDB_ENTRIES (sizeof(HLDB) / sizeof(HLDB[0]))
 
 /*** prototypes ***/
-
-void editorRefreshScreen();
+void editorSetStatusMessage(const char *fmt, ...);
+void editorRefreshScreen(void);
 char *editorPrompt(char *prompt, void (*callback)(char *, int));
+void editorMoveCursor(int key);
+void editorInsertChar(int c);
 
 /*** terminal ***/
-static struct termios orig_termios;
-// void die(const char *s) {
-//     write(STDOUT_FILENO, "\x1b[2J", 4);
-//     write(STDOUT_FILENO, "\x1b[H", 3);
-    
-//     perror(s);
-//     exit(1);
-// }
-
-void disableRawMode(int ab) {
-    if (E.rawmode) {
-        tcsetattr(ab, TCSAFLUSH, &orig_termios);
-        E.rawmode = 0;
-    };
+void die(const char *s) {
+    write(STDOUT_FILENO, "\x1b[2J", 4);
+    write(STDOUT_FILENO, "\x1b[H", 3);
+    perror(s);
+    exit(1);
 }
- 
-void editorDies(void)
-{
-    disableRawMode(STDIN_FILENO);
+
+void disableRawMode(void) {
+    if (E.rawmode) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios);
+        E.rawmode = 0;
+    }
+}
+
+void editorAtExit(void) {
+    disableRawMode();
     write(STDOUT_FILENO, "\x1b[2J", 4);
     write(STDOUT_FILENO, "\x1b[H", 3);
 }
 
-void enableRawMode(int ab) {
-    struct termios raw;
+void enableRawMode(void) {
+    if (E.rawmode) return;
+    if (!isatty(STDIN_FILENO)) die("not a tty");
+    atexit(editorAtExit);
 
-    if (E.rawmode)
-        return 0; /* Already enabled. */
-    if (!isatty(STDIN_FILENO))
-        goto fatal;
-    atexit(editorDies);
-    if (tcgetattr(ab, &orig_termios) == -1)
-        goto fatal;
+    if (tcgetattr(STDIN_FILENO, &E.orig_termios) == -1) die("tcgetattr");
 
-    raw = orig_termios; 
-
+    struct termios raw = E.orig_termios;
     raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
     raw.c_oflag &= ~(OPOST);
-    raw.c_cflag |= (CS8);
+    raw.c_cflag |=  (CS8);
     raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-    raw.c_cc[VMIN] = 0;
+    raw.c_cc[VMIN]  = 0;
     raw.c_cc[VTIME] = 1;
 
-    if (tcsetattr(ab, TCSAFLUSH, &raw) < 0)
-        goto fatal;
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
     E.rawmode = 1;
-    return 0;
-
-fatal:
-    errno = ENOTTY;
-    return -1;
 }
 
-int editorReadKey(int ab) {
+int editorReadKey(void) {
     int nread;
-    char c, seq[3];
-    while ((nread = read(ab, &c, 1)) == 0)
-        ;
-    if (nread == -1)
-        exit(1);
-
-    while (1)
-    {
-        switch (c)
-        {
-        case ESC:
-            if (read(ab, seq, 1) == 0)
-                return ESC;
-            if (read(ab, seq + 1, 1) == 0)
-                return ESC;
-
-            if (seq[0] == '[') {
-                if (seq[1] >= '0' && seq[1] <= '9')
-                {
-                    if (read(ab, seq + 2, 1) == 0)
-                        return ESC;
-                    if (seq[2] == '~')
-                    {
-                        switch (seq[1])
-                        {
-                        case '3':
-                            return DEL_KEY;
-                        case '5':
-                            return PAGE_UP;
-                        case '6':
-                            return PAGE_DOWN;
-                        }
-                    }
-                }
-                else {
-                    switch (seq[1])
-                    {
-                    case 'A':
-                        return ARROW_UP;
-                    case 'B':
-                        return ARROW_DOWN;
-                    case 'C':
-                        return ARROW_RIGHT;
-                    case 'D':
-                        return ARROW_LEFT;
-                    case 'H':
-                        return HOME_KEY;
-                    case 'F':
-                        return END_KEY;
-                    }
-                }
-            }
-
-            else if (seq[0] == 'O') {
-                switch (seq[1]) {
-                case 'H':
-                    return HOME_KEY;
-                case 'F':
-                    return END_KEY;
-                }
-            }
-            break;
-        default:
-            return c;
-        }
+    char c;
+    while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+        if (nread == -1 && errno != EAGAIN) die("read");
     }
+
+    if (c == '\x1b') {
+        char seq[3];
+        if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
+        if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+
+        if (seq[0] == '[') {
+            if (seq[1] >= '0' && seq[1] <= '9') {
+                if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
+                if (seq[2] == '~') {
+                    switch (seq[1]) {
+                        case '1': return HOME_KEY;
+                        case '3': return DEL_KEY;
+                        case '4': return END_KEY;
+                        case '5': return PAGE_UP;
+                        case '6': return PAGE_DOWN;
+                        case '7': return HOME_KEY;
+                        case '8': return END_KEY;
+                    }
+                }
+            } else {
+                switch (seq[1]) {
+                    case 'A': return ARROW_UP;
+                    case 'B': return ARROW_DOWN;
+                    case 'C': return ARROW_RIGHT;
+                    case 'D': return ARROW_LEFT;
+                    case 'H': return HOME_KEY;
+                    case 'F': return END_KEY;
+                }
+            }
+        } else if (seq[0] == 'O') {
+            switch (seq[1]) {
+                case 'H': return HOME_KEY;
+                case 'F': return END_KEY;
+            }
+        }
+        return '\x1b';
+    }
+    return c;
 }
 
-int getCursorPosition(int ifd, int ofd, int *rows, int *cols) {
+int getCursorPosition(int *rows, int *cols) {
     char buf[32];
     unsigned int i = 0;
-    
-    if (write(ofd, "\x1b[6n", 4) != 4) return -1;
 
+    if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1;
     while (i < sizeof(buf) - 1) {
-        if (read(ifd, buf + i, 1) != 1) break;
+        if (read(STDIN_FILENO, &buf[i], 1) != 1) break;
         if (buf[i] == 'R') break;
         i++;
     }
@@ -831,45 +500,18 @@ int getCursorPosition(int ifd, int ofd, int *rows, int *cols) {
 
     if (buf[0] != '\x1b' || buf[1] != '[') return -1;
     if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) return -1;
-
-    if (buf[0] != ESC || buf[1] != '[')
-        return -1;
-    if (sscanf(buf + 2, "%d;%d", rows, cols) != 2)
-        return -1;
     return 0;
 }
 
-int getWindowSize(int ifd, int ofd, int *rows, int *cols) {
+int getWindowSize(int *rows, int *cols) {
     struct winsize ws;
-
-    if (ioctl(1, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-        int orig_row, orig_col, retval;
-
-        retval = getCursorPosition(ifd, ofd, &orig_row, &orig_col);
-        if (retval == -1)
-            goto failed;
-
-        if (write(ofd, "\x1b[999C\x1b[999B", 12) != 12)
-            goto failed;
-        retval = getCursorPosition(ifd, ofd, rows, cols);
-        if (retval == -1)
-            goto failed;
-
-        char seq[32];
-        snprintf(seq, 32, "\x1b[%d;%dH", orig_row, orig_col);
-        if (write(ofd, seq, strlen(seq)) == -1) {
-            // can't recover
-        }
-        return 0;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
+        if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return -1;
+        return getCursorPosition(rows, cols);
     }
-    else {
-        *cols = ws.ws_col;
-        *rows = ws.ws_row;
-        return 0;
-    }
-
-failed:
-    return -1;
+    *cols = ws.ws_col;
+    *rows = ws.ws_row;
+    return 0;
 }
 
 /*** syntax highlighting ***/
@@ -877,132 +519,114 @@ int is_separator(int c) {
     return isspace(c) || c == '\0' || strchr(",.()+-/*=~%<>[];", c) != NULL;
 }
 
-int editorOpenCommentFound(erow *row) {
-    if (row->hl && row->rsize && row->hl[row->rsize - 1] == HL_MLCOMMENT &&
-        (row->rsize < 2 || (row->render[row->rsize - 2] != '*' ||
-                            row->render[row->rsize - 1] != '/')))
-        return 1;
-    return 0;
-}
-
 void editorUpdateSyntax(erow *row) {
     row->hl = realloc(row->hl, row->rsize);
-    memset(row->hl, HL_NORMAL, row->rsize);
+    if (row->rsize > 0)
+        memset(row->hl, HL_NORMAL, row->rsize);
 
     if (E.syntax == NULL) return;
-    
-    char **keywords = E.syntax->keywords;
 
+    char **keywords = E.syntax->keywords;
     char *scs = E.syntax->singleline_comment_start;
     char *mcs = E.syntax->multiline_comment_start;
     char *mce = E.syntax->multiline_comment_end;
 
-    char *p = row->render;
+    int scs_len = scs ? (int)strlen(scs) : 0;
+    int mcs_len = mcs ? (int)strlen(mcs) : 0;
+    int mce_len = mce ? (int)strlen(mce) : 0;
+
+    int prev_sep   = 1;
+    int in_string  = 0;
+    int in_comment = (row->idx > 0 && E.row[row->idx - 1].hl_open_comment);
+
     int i = 0;
-    while (*p && isspace(*p)) {
-        p++;
-        i++;
-    }
-    int prev_sep = 1;
-    int in_string = 0; 
-    int in_comment = 0;
+    while (i < row->rsize) {
+        char c = row->render[i];
+        unsigned char prev_hl = (i > 0) ? row->hl[i - 1] : HL_NORMAL;
 
-    if (row->idx > 0 && editorOpenCommentFound(&E.row[row->idx - 1])) in_comment = 1;
-
-    while (*p)
-    {
-       
-        if (prev_sep && *p == scs[0]) {
-            if (scs[1] == '\0' || *(p + 1) == scs[1]) {
-                /* From here to end is a comment */
-                memset(row->hl + i, HL_COMMENT, row->size - i);
-                return;
+        /* Single-line comment */
+        if (scs_len && !in_string && !in_comment) {
+            if (!strncmp(&row->render[i], scs, scs_len)) {
+                memset(&row->hl[i], HL_COMMENT, row->rsize - i);
+                break;
             }
         }
 
-        if (in_comment) {
-            row->hl[i] = HL_MLCOMMENT;
-            if (*p == mce[0] && *(p + 1) == mce[1]) {
-                row->hl[i + 1] = HL_MLCOMMENT;
-                p += 2;
-                i += 2;
-                in_comment = 0;
+        /* Multi-line comment */
+        if (mcs_len && mce_len && !in_string) {
+            if (in_comment) {
+                row->hl[i] = HL_MLCOMMENT;
+                if (!strncmp(&row->render[i], mce, mce_len)) {
+                    memset(&row->hl[i], HL_MLCOMMENT, mce_len);
+                    i += mce_len;
+                    in_comment = 0;
+                    prev_sep = 1;
+                    continue;
+                } else {
+                    i++;
+                    continue;
+                }
+            } else if (!strncmp(&row->render[i], mcs, mcs_len)) {
+                memset(&row->hl[i], HL_MLCOMMENT, mcs_len);
+                i += mcs_len;
+                in_comment = 1;
+                continue;
+            }
+        }
+
+        /* Strings */
+        if (E.syntax->flags & HL_HIGHLIGHT_STRINGS) {
+            if (in_string) {
+                row->hl[i] = HL_STRING;
+                if (c == '\\' && i + 1 < row->rsize) {
+                    row->hl[i + 1] = HL_STRING;
+                    i += 2;
+                    continue;
+                }
+                if (c == in_string) in_string = 0;
+                i++;
                 prev_sep = 1;
                 continue;
+            } else {
+                if (c == '"' || c == '\'') {
+                    in_string = c;
+                    row->hl[i] = HL_STRING;
+                    i++;
+                    continue;
+                }
             }
-            else {
-                prev_sep = 0;
-                p++;
-                i++;
-                continue;
-            }
-        }
-        else if (*p == mcs[0] && *(p + 1) == mcs[1]) {
-            row->hl[i] = HL_MLCOMMENT;
-            row->hl[i + 1] = HL_MLCOMMENT;
-            p += 2;
-            i += 2;
-            in_comment = 1;
-            prev_sep = 0;
-            continue;
         }
 
-        if (in_string) {
-            row->hl[i] = HL_STRING;
-            if (*p == '\\')
-            {
-                row->hl[i + 1] = HL_STRING;
-                p += 2;
-                i += 2;
-                prev_sep = 0;
-                continue;
-            }
-            if (*p == in_string)
-                in_string = 0;
-            p++;
-            i++;
-            continue;
-        }
-        else {
-            if (*p == '"' || *p == '\'') {
-                in_string = *p;
-                row->hl[i] = HL_STRING;
-                p++;
+        /* Numbers */
+        if (E.syntax->flags & HL_HIGHLIGHT_NUMBERS) {
+            if ((isdigit(c) && (prev_sep || prev_hl == HL_NUMBER)) ||
+                (c == '.' && prev_hl == HL_NUMBER)) {
+                row->hl[i] = HL_NUMBER;
                 i++;
                 prev_sep = 0;
                 continue;
             }
         }
 
-        if (!isprint(*p)) {
+        /* Non-printable characters */
+        if (!isprint((unsigned char)c)) {
             row->hl[i] = HL_NONPRINT;
-            p++;
             i++;
             prev_sep = 0;
             continue;
         }
 
-        if ((isdigit(*p) && (prev_sep || row->hl[i - 1] == HL_NUMBER)) ||
-            (*p == '.' && i > 0 && row->hl[i - 1] == HL_NUMBER)) {
-            row->hl[i] = HL_NUMBER;
-            p++;
-            i++;
-            prev_sep = 0;
-            continue;
-        }
-
+        /* Keywords */
         if (prev_sep) {
             int j;
             for (j = 0; keywords[j]; j++) {
-                int klen = strlen(keywords[j]);
-                int kw2 = keywords[j][klen - 1] == '|';
-                if (kw2)
-                    klen--;
+                int klen = (int)strlen(keywords[j]);
+                int kw2  = keywords[j][klen - 1] == '|';
+                if (kw2) klen--;
 
-                if (!memcmp(p, keywords[j], klen) &&
-                    is_separator(*(p + klen))) {
-                    memset(row->hl + i, kw2 ? HL_KEYWORD2 : HL_KEYWORD1, klen);
-                    p += klen;
+                if (!strncmp(&row->render[i], keywords[j], klen) &&
+                        is_separator(row->render[i + klen])) {
+                    memset(&row->hl[i], kw2 ? HL_KEYWORD2 : HL_KEYWORD1, klen);
                     i += klen;
                     break;
                 }
@@ -1013,102 +637,116 @@ void editorUpdateSyntax(erow *row) {
             }
         }
 
-        prev_sep = is_separator(*p);
-        p++;
+        prev_sep = is_separator(c);
         i++;
     }
 
-    int oc = editorOpenCommentFound(row);
-    if (row->hl_open_comment != oc && row->idx + 1 < E.numrows)
+    int changed = (row->hl_open_comment != in_comment);
+    row->hl_open_comment = in_comment;
+    if (changed && row->idx + 1 < E.numrows)
         editorUpdateSyntax(&E.row[row->idx + 1]);
-    row->hl_open_comment= oc;
 }
 
 int editorSyntaxToColor(int hl) {
     switch (hl) {
-        case HL_COMMENT: 
+        case HL_COMMENT:
         case HL_MLCOMMENT: return 36;
-        case HL_KEYWORD1 : return 33;
-        case HL_KEYWORD2 : return 32;
-        case HL_STRING: return 35;
-        case HL_NUMBER: return 31;
-        case HL_MATCH: return 34;
-        default: return 37;
+        case HL_KEYWORD1:  return 33;
+        case HL_KEYWORD2:  return 32;
+        case HL_STRING:    return 35;
+        case HL_NUMBER:    return 31;
+        case HL_MATCH:     return 34;
+        default:           return 37;
     }
 }
 
-void editorSelectSyntaxHighlight(char *filename) {
+void editorSelectSyntaxHighlight(void) {
+    E.syntax = NULL;
+    if (E.filename == NULL) return;
+
+    char *ext = strrchr(E.filename, '.');
+
     for (unsigned int j = 0; j < HLDB_ENTRIES; j++) {
-        struct editorSyntax *s = HLDB + j;
+        struct editorSyntax *s = &HLDB[j];
         unsigned int i = 0;
         while (s->filematch[i]) {
-            char *p;
-            int patlen = strlen(s->filematch[i]);
-            if ((p = strstr(filename, s->filematch[i])) != NULL) {
-                if (s->filematch[i][0] != '.' || p[patlen] == '\0') {
-                    E.syntax = s;
-                    return;
-                }
+            int is_ext = (s->filematch[i][0] == '.');
+            if ((is_ext && ext && !strcmp(ext, s->filematch[i])) ||
+                (!is_ext && strstr(E.filename, s->filematch[i]))) {
+                E.syntax = s;
+                for (int filerow = 0; filerow < E.numrows; filerow++)
+                    editorUpdateSyntax(&E.row[filerow]);
+                return;
             }
             i++;
         }
     }
 }
 
-/*** row operation ***/
-void editorUpdateRow(erow *row) {
-    unsigned int tabs = 0;
-    int nonprint = 0;
-
-    int j, idx;
-    free(row->render);
-    for (j = 0; j < row->size; j++)
-        if (row->chars[j] == TAB) tabs++;
-
-    unsigned long long allocsize =
-        (unsigned long long)row->size + tabs * 8 + nonprint * 9 + 1;
-    if (allocsize > UINT32_MAX) {
-        printf("A line on the edited file was too long for Filó\n");
-        exit(1);
+/*** row operations ***/
+int editorRowCxToRx(erow *row, int cx) {
+    int rx = 0;
+    for (int j = 0; j < cx; j++) {
+        if (row->chars[j] == '\t')
+            rx += (FILO_TAB_STOP - 1) - (rx % FILO_TAB_STOP);
+        rx++;
     }
-    
-    row->render = malloc(row->size + tabs * 8 + nonprint * 9 + 1);
+    return rx;
+}
 
-    idx = 0;
-    for (j = 0; j < row->size; j++) {
-        if (row->chars[j] == TAB) {
+int editorRowRxToCx(erow *row, int rx) {
+    int cur_rx = 0;
+    int cx;
+    for (cx = 0; cx < row->size; cx++) {
+        if (row->chars[cx] == '\t')
+            cur_rx += (FILO_TAB_STOP - 1) - (cur_rx % FILO_TAB_STOP);
+        cur_rx++;
+        if (cur_rx > rx) return cx;
+    }
+    return cx;
+}
+
+void editorUpdateRow(erow *row) {
+    int tabs = 0;
+    for (int j = 0; j < row->size; j++)
+        if (row->chars[j] == '\t') tabs++;
+
+    free(row->render);
+    row->render = malloc(row->size + tabs * (FILO_TAB_STOP - 1) + 1);
+
+    int idx = 0;
+    for (int j = 0; j < row->size; j++) {
+        if (row->chars[j] == '\t') {
             row->render[idx++] = ' ';
-            while ((idx + 1) % 8 != 0)
-                row->render[idx++] = ' ';
-        }
-        else {
+            while (idx % FILO_TAB_STOP != 0) row->render[idx++] = ' ';
+        } else {
             row->render[idx++] = row->chars[j];
         }
     }
-    row->rsize = idx;
     row->render[idx] = '\0';
+    row->rsize = idx;
 
     editorUpdateSyntax(row);
 }
 
 void editorInsertRow(int at, char *s, size_t len) {
-     if (at > E.numrows) return;
+    if (at < 0 || at > E.numrows) return;
 
     E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
-    if (at != E.numrows) {
-        memmove(E.row + at + 1, E.row + at, sizeof(E.row[0]) * (E.numrows - at));
-        for (int j = at + 1; j <= E.numrows; j++)
-            E.row[j].idx++;
-    }
+    memmove(&E.row[at + 1], &E.row[at], sizeof(erow) * (E.numrows - at));
+    for (int j = at + 1; j <= E.numrows; j++) E.row[j].idx++;
+
+    E.row[at].idx  = at;
     E.row[at].size = len;
     E.row[at].chars = malloc(len + 1);
-    memcpy(E.row[at].chars, s, len + 1);
+    memcpy(E.row[at].chars, s, len);
+    E.row[at].chars[len] = '\0';
+    E.row[at].rsize = 0;
+    E.row[at].render = NULL;
     E.row[at].hl = NULL;
     E.row[at].hl_open_comment = 0;
-    E.row[at].render = NULL;
-    E.row[at].rsize = 0;
-    E.row[at].idx = at;
-    editorUpdateRow(E.row + at);
+    editorUpdateRow(&E.row[at]);
+
     E.numrows++;
     E.dirty++;
 }
@@ -1120,55 +758,19 @@ void editorFreeRow(erow *row) {
 }
 
 void editorDelRow(int at) {
-    erow *row;
-
-    if (at >= E.numrows) return;
-    row = E.row + at;
-    editorFreeRow(row);
-    memmove(E.row + at, E.row + at + 1, sizeof(E.row[0]) * (E.numrows - at - 1));
-
-    for (int j = at; j < E.numrows - 1; j++) 
-        E.row[j].idx++;
+    if (at < 0 || at >= E.numrows) return;
+    editorFreeRow(&E.row[at]);
+    memmove(&E.row[at], &E.row[at + 1], sizeof(erow) * (E.numrows - at - 1));
+    for (int j = at; j < E.numrows - 1; j++) E.row[j].idx--;
     E.numrows--;
     E.dirty++;
 }
 
-char *editorRowsToString(int *buflen)
-{
-    char *buf = NULL, *p;
-    int totlen = 0;
-    int j;
-
-    for (j = 0; j < E.numrows; j++) 
-        totlen += E.row[j].size + 1;
-    *buflen = totlen;
-    totlen++;
-
-    p = buf = malloc(totlen);
-    for (j = 0; j < E.numrows; j++)
-    {
-        memcpy(p, E.row[j].chars, E.row[j].size);
-        p += E.row[j].size;
-        *p = '\n';
-        p++;
-    }
-    *p = '\0';
-    return buf;
-}
-
 void editorRowInsertChar(erow *row, int at, int c) {
-    if (at > row->size) {
-        int padlen = at - row->size;
-        row->chars = realloc(row->chars, row->size + padlen + 2);
-        memset(row->chars + row->size, ' ', padlen);
-        row->chars[row->size + padlen + 1] = '\0';
-        row->size += padlen + 1;
-    }
-    else {
-        row->chars = realloc(row->chars, row->size + 2);
-        memmove(row->chars + at + 1, row->chars + at, row->size - at + 1);
-        row->size++;
-    }
+    if (at < 0 || at > row->size) at = row->size;
+    row->chars = realloc(row->chars, row->size + 2);
+    memmove(&row->chars[at + 1], &row->chars[at], row->size - at + 1);
+    row->size++;
     row->chars[at] = c;
     editorUpdateRow(row);
     E.dirty++;
@@ -1176,7 +778,7 @@ void editorRowInsertChar(erow *row, int at, int c) {
 
 void editorRowAppendString(erow *row, char *s, size_t len) {
     row->chars = realloc(row->chars, row->size + len + 1);
-    memcpy(row->chars + row->size, s, len);
+    memcpy(&row->chars[row->size], s, len);
     row->size += len;
     row->chars[row->size] = '\0';
     editorUpdateRow(row);
@@ -1184,133 +786,139 @@ void editorRowAppendString(erow *row, char *s, size_t len) {
 }
 
 void editorRowDelChar(erow *row, int at) {
-    if (row->size <= at) return;
-    memmove(row->chars + at, row->chars + at + 1, row->size - at);
-    editorUpdateRow(row);
+    if (at < 0 || at >= row->size) return;
+    memmove(&row->chars[at], &row->chars[at + 1], row->size - at);
     row->size--;
+    editorUpdateRow(row);
     E.dirty++;
 }
 
 /*** editor operations ***/
+
+/* Autocompletion pairs */
+struct autopair {
+    int open_char;
+    int close_char;
+};
+
+struct autopair autopairs[] = {
+    { '{',  '}' },
+    { '[',  ']' },
+    { '(',  ')' },
+    { '"',  '"' },
+    { '\'', '\'' },
+    { '`',  '`'  },
+    { '<',  '>'  },
+};
+#define AUTOPAIRS_COUNT (sizeof(autopairs) / sizeof(autopairs[0]))
+
+int editorFindCloseChar(int open_char) {
+    for (size_t i = 0; i < AUTOPAIRS_COUNT; i++) {
+        if (autopairs[i].open_char == open_char)
+            return autopairs[i].close_char;
+    }
+    return 0;
+}
+
 void editorInsertChar(int c) {
-    int filerow = E.rowoff + E.cy;
-    int filecol = E.coloff + E.cx;
-    erow *row = (filerow >= E.numrows) ? NULL : &E.row[filerow];
-
-    if (!row) {
-        while (E.numrows <= filerow)
-            editorInsertRow(E.numrows, "", 0);
-    }
-    row = &E.row[filerow];
-    editorRowInsertChar(row, filecol, c);
-    if (E.cx == E.screencols - 1)
-        E.coloff++;
-    else
-        E.cx++;
-    E.dirty++;
+    if (E.cy == E.numrows)
+        editorInsertRow(E.numrows, "", 0);
+    editorRowInsertChar(&E.row[E.cy], E.cx, c);
+    E.cx++;
 }
 
-void editorInsertNewline() {
-    int filerow = E.rowoff + E.cy;
-    int filecol = E.coloff + E.cx;
-    erow *row = (filerow >= E.numrows) ? NULL : &E.row[filerow];
+void editorInsertCharAutoComplete(int c) {
+    erow *row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
+    int at_end          = (!row || E.cx >= row->size);
+    int next_is_special = at_end
+        || isspace((unsigned char)row->chars[E.cx])
+        || strchr(",.()+-/*=~%[];{}", row->chars[E.cx]) != NULL;
 
-    if (!row) {
-        if (filerow == E.numrows) {
-            editorInsertRow(filerow, "", 0);
-            goto fixcursor;
-        }
-        return;
+    int close_char = editorFindCloseChar(c);
+    editorInsertChar(c);
+
+    if (!E.paste_mode && close_char && next_is_special) {
+        editorInsertChar(close_char);
+        editorMoveCursor(ARROW_LEFT);
     }
+}
 
-    if (filecol >= row->size)
-        filecol = row->size;
-    if (filecol == 0) {
-        editorInsertRow(filerow, "", 0);
-    }
-    else {
-
-        editorInsertRow(filerow + 1, row->chars + filecol, row->size - filecol);
-        row = &E.row[filerow];
-        row->chars[filecol] = '\0';
-        row->size = filecol;
+void editorInsertNewline(void) {
+    if (E.cx == 0) {
+        editorInsertRow(E.cy, "", 0);
+    } else {
+        erow *row = &E.row[E.cy];
+        editorInsertRow(E.cy + 1, &row->chars[E.cx], row->size - E.cx);
+        row = &E.row[E.cy];
+        row->size = E.cx;
+        row->chars[row->size] = '\0';
         editorUpdateRow(row);
     }
-    fixcursor:
-    if (E.cy == E.screenrows - 1) {
-        E.rowoff++;
-    }
-    else {
-        E.cy++;
-    }
+    E.cy++;
     E.cx = 0;
-    E.coloff = 0;
 }
 
-void editorDelChar() {
-    int filerow = E.rowoff + E.cy;
-    int filecol = E.coloff + E.cx;
-    erow *row = (filerow >= E.numrows) ? NULL : &E.row[filerow];
+void editorDelChar(void) {
+    if (E.cy == E.numrows) return;
+    if (E.cx == 0 && E.cy == 0) return;
 
-    if (E.last_key == CTRL_H && row) {
-        editorDelRow(filerow);
-        if (E.cy > 0) {
-            E.cy--;
-        }
-        else if (E.rowoff > 0) {
-            E.rowoff--;
-        }
+    erow *row = &E.row[E.cy];
+
+    /* Ctrl-H: delete the entire current line */
+    if (E.last_key == CTRL_KEY('h')) {
+        editorDelRow(E.cy);
+        if (E.cy > 0 && E.cy >= E.numrows) E.cy--;
         E.cx = 0;
-        E.coloff = 0;
-        E.dirty++;
         return;
     }
 
-    if (!row || (filecol == 0 && filerow == 0)) return;
-    if (filecol == 0) {
-        filecol = E.row[filerow - 1].size;
-        editorRowAppendString(&E.row[filerow - 1], row->chars, row->size);
-        editorDelRow(filerow);
-        row = NULL;
-        if (E.cy == 0)
-            E.rowoff--;
-        else
-            E.cy--;
-        E.cx = filecol;
-        if (E.cx >= E.screencols) {
-            int shift = (E.screencols - E.cx) + 1;
-            E.cx -= shift;
-            E.coloff += shift;
-        }
+    if (E.cx > 0) {
+        editorRowDelChar(row, E.cx - 1);
+        E.cx--;
+    } else {
+        E.cx = E.row[E.cy - 1].size;
+        editorRowAppendString(&E.row[E.cy - 1], row->chars, row->size);
+        editorDelRow(E.cy);
+        E.cy--;
     }
-    else {
-        editorRowDelChar(row, filecol - 1);
-        if (E.cx == 0 && E.coloff)
-            E.coloff--;
-        else
-            E.cx--;
-    }
-    if (row)
-        editorUpdateRow(row);
-    E.dirty++;
 }
 
 /*** file i/o ***/
+char *editorRowsToString(int *buflen) {
+    int totlen = 0;
+    for (int j = 0; j < E.numrows; j++)
+        totlen += E.row[j].size + 1;
+    *buflen = totlen;
+
+    char *buf = malloc(totlen);
+    char *p = buf;
+    for (int j = 0; j < E.numrows; j++) {
+        memcpy(p, E.row[j].chars, E.row[j].size);
+        p += E.row[j].size;
+        *p = '\n';
+        p++;
+    }
+    return buf;
+}
+
 void editorOpen(char *filename) {
     free(E.filename);
     E.filename = strdup(filename);
-
     editorSelectSyntaxHighlight();
 
     FILE *fp = fopen(filename, "r");
-    if (!fp) die("fopen");
+    if (!fp) {
+        /* New file is not an error */
+        if (errno != ENOENT) die("fopen");
+        return;
+    }
 
     char *line = NULL;
     size_t linecap = 0;
     ssize_t linelen;
     while ((linelen = getline(&line, &linecap, fp)) != -1) {
         while (linelen > 0 && (line[linelen - 1] == '\n' ||
-                                line[linelen - 1] == '\r'))
+                               line[linelen - 1] == '\r'))
             linelen--;
         editorInsertRow(E.numrows, line, linelen);
     }
@@ -1319,7 +927,7 @@ void editorOpen(char *filename) {
     E.dirty = 0;
 }
 
-void editorSave() {
+void editorSave(void) {
     if (E.filename == NULL) {
         E.filename = editorPrompt("Save as: %s (ESC to cancel)", NULL);
         if (E.filename == NULL) {
@@ -1332,7 +940,7 @@ void editorSave() {
     int len;
     char *buf = editorRowsToString(&len);
 
-    int fd = open(E.filename, O_RDWR | O_CREAT, 0664);
+    int fd = open(E.filename, O_RDWR | O_CREAT, 0644);
     if (fd != -1) {
         if (ftruncate(fd, len) != -1) {
             if (write(fd, buf, len) == len) {
@@ -1345,16 +953,14 @@ void editorSave() {
         }
         close(fd);
     }
-
     free(buf);
     editorSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
 }
 
-/*** find function ***/
+/*** find ***/
 void editorFindCallback(char *query, int key) {
     static int last_match = -1;
-    static int direction = 1;
-
+    static int direction  = 1;
     static int saved_hl_line;
     static char *saved_hl = NULL;
 
@@ -1366,34 +972,31 @@ void editorFindCallback(char *query, int key) {
 
     if (key == '\r' || key == '\x1b') {
         last_match = -1;
-        direction = 1;
+        direction  = 1;
         return;
-    }
-    else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
+    } else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
         direction = 1;
-    }
-    else if (key == ARROW_LEFT || key == ARROW_UP) {
+    } else if (key == ARROW_LEFT || key == ARROW_UP) {
         direction = -1;
-    }
-    else {
+    } else {
         last_match = -1;
-        direction = 1;
+        direction  = 1;
     }
 
     if (last_match == -1) direction = 1;
     int current = last_match;
-    int i;
-    for (i = 0; i < E.numrows; i++) {
+
+    for (int i = 0; i < E.numrows; i++) {
         current += direction;
-        if (current == -1) current = E.numrows -1;
+        if (current == -1)          current = E.numrows - 1;
         else if (current == E.numrows) current = 0;
 
-        erow *row = &E.row[current];
+        erow *row   = &E.row[current];
         char *match = strstr(row->render, query);
         if (match) {
             last_match = current;
-            E.cy = current;
-            E.cx = editorRowRxToCx(row, match - row->render);
+            E.cy     = current;
+            E.cx     = editorRowRxToCx(row, match - row->render);
             E.rowoff = E.numrows;
 
             saved_hl_line = current;
@@ -1405,19 +1008,18 @@ void editorFindCallback(char *query, int key) {
     }
 }
 
-void editorFind() {
-    int saved_cx = E.cx;
-    int saved_cy = E.cy;
+void editorFind(void) {
+    int saved_cx     = E.cx;
+    int saved_cy     = E.cy;
     int saved_coloff = E.coloff;
     int saved_rowoff = E.rowoff;
 
-    char *query = editorPrompt("Search %s (Use ESC/Arrows/Enter)", editorFindCallback);
+    char *query = editorPrompt("Search: %s (ESC/Arrows/Enter)", editorFindCallback);
     if (query) {
         free(query);
-    }
-    else {
-        E.cx = saved_cx;
-        E.cy = saved_cy;
+    } else {
+        E.cx     = saved_cx;
+        E.cy     = saved_cy;
         E.coloff = saved_coloff;
         E.rowoff = saved_rowoff;
     }
@@ -1433,11 +1035,10 @@ struct abuf {
 
 void abAppend(struct abuf *ab, const char *s, int len) {
     char *new = realloc(ab->b, ab->len + len);
-
     if (new == NULL) return;
     memcpy(&new[ab->len], s, len);
     ab->b = new;
-    ab-> len += len;
+    ab->len += len;
 }
 
 void abFree(struct abuf *ab) {
@@ -1445,35 +1046,29 @@ void abFree(struct abuf *ab) {
 }
 
 /*** output ***/
-void editorScroll() {
+void editorScroll(void) {
     E.rx = 0;
-    if (E.cy < E.numrows) {
-        E.rx = editorRowCXToRx(&E.row[E.cy], E.cx);
-    }
+    if (E.cy < E.numrows)
+        E.rx = editorRowCxToRx(&E.row[E.cy], E.cx);
 
-    if (E.cy < E.rowoff) {
+    if (E.cy < E.rowoff)
         E.rowoff = E.cy;
-    }
-    if (E.cy >= E.rowoff + E.screenrows) {
+    if (E.cy >= E.rowoff + E.screenrows)
         E.rowoff = E.cy - E.screenrows + 1;
-    }
-    if (E.rx < E.coloff) {
+    if (E.rx < E.coloff)
         E.coloff = E.rx;
-    }
-    if (E.rx >= E.coloff +  E.screencols) {
+    if (E.rx >= E.coloff + E.screencols)
         E.coloff = E.rx - E.screencols + 1;
-    }
 }
 
 void editorDrawRows(struct abuf *ab) {
-    int y;
-    for (y = 0; y < E.screenrows; y++) {
+    for (int y = 0; y < E.screenrows; y++) {
         int filerow = y + E.rowoff;
         if (filerow >= E.numrows) {
             if (E.numrows == 0 && y == E.screenrows / 3) {
                 char welcome[80];
                 int welcomelen = snprintf(welcome, sizeof(welcome),
-                    "Filo editor -- version %s", FILO_VERSION);
+                    "Filó editor -- version %s", FILO_VERSION);
                 if (welcomelen > E.screencols) welcomelen = E.screencols;
                 int padding = (E.screencols - welcomelen) / 2;
                 if (padding) {
@@ -1482,22 +1077,21 @@ void editorDrawRows(struct abuf *ab) {
                 }
                 while (padding--) abAppend(ab, " ", 1);
                 abAppend(ab, welcome, welcomelen);
+            } else {
+                abAppend(ab, "~", 1);
             }
-            else {
-            abAppend(ab, "~", 1);
-            }
-        }
-        else {
+        } else {
             int len = E.row[filerow].rsize - E.coloff;
             if (len < 0) len = 0;
             if (len > E.screencols) len = E.screencols;
-            char *c = &E.row[filerow].render[E.coloff];
+
+            char *c          = &E.row[filerow].render[E.coloff];
             unsigned char *hl = &E.row[filerow].hl[E.coloff];
             int current_color = -1;
-            int j;
-            for (j = 0; j < len; j++) {
-                if (iscntrl(c[j])) {
-                    char sym = (c[j] <= 26) ? '@' + c[j] : '?';
+
+            for (int j = 0; j < len; j++) {
+                if (hl[j] == HL_NONPRINT) {
+                    char sym = ((unsigned char)c[j] <= 26) ? '@' + c[j] : '?';
                     abAppend(ab, "\x1b[7m", 4);
                     abAppend(ab, &sym, 1);
                     abAppend(ab, "\x1b[m", 3);
@@ -1506,15 +1100,13 @@ void editorDrawRows(struct abuf *ab) {
                         int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", current_color);
                         abAppend(ab, buf, clen);
                     }
-                }
-                else if (hl[j] == HL_NORMAL) { 
+                } else if (hl[j] == HL_NORMAL) {
                     if (current_color != -1) {
                         abAppend(ab, "\x1b[39m", 5);
                         current_color = -1;
                     }
                     abAppend(ab, &c[j], 1);
-                }
-                else {
+                } else {
                     int color = editorSyntaxToColor(hl[j]);
                     if (color != current_color) {
                         current_color = color;
@@ -1527,10 +1119,8 @@ void editorDrawRows(struct abuf *ab) {
             }
             abAppend(ab, "\x1b[39m", 5);
         }
-
-        abAppend(ab,"\x1b[K", 3);
+        abAppend(ab, "\x1b[K", 3);
         abAppend(ab, "\r\n", 2);
-        
     }
 }
 
@@ -1542,17 +1132,15 @@ void editorDrawStatusBar(struct abuf *ab) {
         E.dirty ? "(modified)" : "");
     int rlen = snprintf(rstatus, sizeof(rstatus), "%s | %d/%d",
         E.syntax ? E.syntax->filetype : "no ft", E.cy + 1, E.numrows);
-    if (len > E.screencols) len =  E.screencols;
+    if (len > E.screencols) len = E.screencols;
     abAppend(ab, status, len);
     while (len < E.screencols) {
         if (E.screencols - len == rlen) {
             abAppend(ab, rstatus, rlen);
             break;
         }
-        else {
-            abAppend(ab, " ", 1);
-            len++;
-        }
+        abAppend(ab, " ", 1);
+        len++;
     }
     abAppend(ab, "\x1b[m", 3);
     abAppend(ab, "\r\n", 2);
@@ -1566,11 +1154,10 @@ void editorDrawMessageBar(struct abuf *ab) {
         abAppend(ab, E.statusmsg, msglen);
 }
 
-void editorRefreshScreen() {
+void editorRefreshScreen(void) {
     editorScroll();
 
     struct abuf ab = ABUF_INIT;
-
     abAppend(&ab, "\x1b[?25l", 6);
     abAppend(&ab, "\x1b[H", 3);
 
@@ -1579,12 +1166,12 @@ void editorRefreshScreen() {
     editorDrawMessageBar(&ab);
 
     char buf[32];
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1,
-                                              (E.rx - E.coloff) + 1);
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
+        (E.cy - E.rowoff) + 1,
+        (E.rx - E.coloff) + 1);
     abAppend(&ab, buf, strlen(buf));
-
     abAppend(&ab, "\x1b[?25h", 6);
-    
+
     write(STDOUT_FILENO, ab.b, ab.len);
     abFree(&ab);
 }
@@ -1600,8 +1187,7 @@ void editorSetStatusMessage(const char *fmt, ...) {
 /*** input ***/
 char *editorPrompt(char *prompt, void (*callback)(char *, int)) {
     size_t bufsize = 128;
-    char *buf = malloc(bufsize);
-
+    char  *buf = malloc(bufsize);
     size_t buflen = 0;
     buf[0] = '\0';
 
@@ -1610,31 +1196,27 @@ char *editorPrompt(char *prompt, void (*callback)(char *, int)) {
         editorRefreshScreen();
 
         int c = editorReadKey();
-        if (c == DEL_KEY ||  c == CTRL_KEY('h') || c == BACKSPACE) {
+        if (c == DEL_KEY || c == CTRL_KEY('h') || c == BACKSPACE) {
             if (buflen != 0) buf[--buflen] = '\0';
-        }
-        else if (c == '\x1b') {
+        } else if (c == '\x1b') {
             editorSetStatusMessage("");
             if (callback) callback(buf, c);
             free(buf);
             return NULL;
-        }
-        else if (c == '\r') {
+        } else if (c == '\r') {
             if (buflen != 0) {
                 editorSetStatusMessage("");
                 if (callback) callback(buf, c);
                 return buf;
             }
-        }
-        else if (!iscntrl(c) && c < 128) {
+        } else if (!iscntrl(c) && c < 128) {
             if (buflen == bufsize - 1) {
                 bufsize *= 2;
                 buf = realloc(buf, bufsize);
             }
             buf[buflen++] = c;
-            buf[buflen] = '\0';
+            buf[buflen]   = '\0';
         }
-
         if (callback) callback(buf, c);
     }
 }
@@ -1646,8 +1228,7 @@ void editorMoveCursor(int key) {
         case ARROW_LEFT:
             if (E.cx != 0) {
                 E.cx--;
-                }
-            else if (E.cy > 0) {
+            } else if (E.cy > 0) {
                 E.cy--;
                 E.cx = E.row[E.cy].size;
             }
@@ -1655,35 +1236,40 @@ void editorMoveCursor(int key) {
         case ARROW_RIGHT:
             if (row && E.cx < row->size) {
                 E.cx++;
-            }
-            else if (row && E.cx == row->size) {
+            } else if (row && E.cx == row->size) {
                 E.cy++;
                 E.cx = 0;
             }
             break;
-         case ARROW_UP:
-            if (E.cy != 0) {
-                E.cy--;
-                }
+        case ARROW_UP:
+            if (E.cy != 0) E.cy--;
             break;
         case ARROW_DOWN:
-            if (E.cy < E.numrows) {
-                E.cy++;
-            }
+            if (E.cy < E.numrows) E.cy++;
             break;
     }
 
     row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
     int rowlen = row ? row->size : 0;
-    if (E.cx > rowlen) {
-        E.cx = rowlen;
-    }
+    if (E.cx > rowlen) E.cx = rowlen;
 }
 
-void editorProcessKeypress() {
+void editorProcessKeypress(void) {
     static int quit_times = FILO_QUIT_TIMES;
 
     int c = editorReadKey();
+    E.last_key = c;
+
+    /* Paste mode detection: rapid successive chars = paste */
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    if (tv.tv_sec == E.last_char_time.tv_sec &&
+        (tv.tv_usec - E.last_char_time.tv_usec) < 30000) {
+        E.paste_mode = 1;
+    } else {
+        E.paste_mode = 0;
+    }
+    E.last_char_time = tv;
 
     switch (c) {
         case '\r':
@@ -1691,16 +1277,17 @@ void editorProcessKeypress() {
             break;
 
         case CTRL_KEY('q'):
-        if (E.dirty && quit_times > 0) {
-            editorSetStatusMessage("WARNING!!! File has unsaved changes. "
-            "Press Ctrl-Q %d more times to quit.", quit_times);
-            quit_times--;
-            return;
-        }
-        write(STDOUT_FILENO, "\x1b[2J", 4);
-        write(STDOUT_FILENO, "\x1b[H", 3);
-        exit(0);
-        break;
+            if (E.dirty && quit_times > 0) {
+                editorSetStatusMessage(
+                    "WARNING!!! File has unsaved changes. "
+                    "Press Ctrl-Q %d more times to quit.", quit_times);
+                quit_times--;
+                return;
+            }
+            write(STDOUT_FILENO, "\x1b[2J", 4);
+            write(STDOUT_FILENO, "\x1b[H", 3);
+            exit(0);
+            break;
 
         case CTRL_KEY('s'):
             editorSave();
@@ -1728,14 +1315,12 @@ void editorProcessKeypress() {
         case PAGE_UP:
         case PAGE_DOWN:
         {
-            if (c == PAGE_UP) {
+            if (c == PAGE_UP)
                 E.cy = E.rowoff;
-            }
-            else if (c == PAGE_DOWN) {
+            else {
                 E.cy = E.rowoff + E.screenrows - 1;
-                if  (E.cy > E.numrows) E.cy = E.numrows;
+                if (E.cy > E.numrows) E.cy = E.numrows;
             }
-
             int times = E.screenrows;
             while (times--)
                 editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
@@ -1749,48 +1334,86 @@ void editorProcessKeypress() {
             editorMoveCursor(c);
             break;
 
+        case CTRL_KEY('c'):
+            /* Ignore Ctrl-C to prevent accidental loss of changes */
+            break;
+
         case CTRL_KEY('l'):
         case '\x1b':
             break;
 
         default:
-            editorInsertChar(c);
+            editorInsertCharAutoComplete(c);
             break;
     }
 
     quit_times = FILO_QUIT_TIMES;
 }
 
+/*** window resize ***/
+void updateWindowSize(void) {
+    int rows, cols;
+    int attempts = 0;
+    while (attempts < 3) {
+        if (getWindowSize(&rows, &cols) == 0) {
+            E.screenrows = rows - 2;
+            E.screencols = cols;
+            return;
+        }
+        attempts++;
+        if (attempts < 3) usleep(10000);
+    }
+    editorSetStatusMessage("Warning: Could not update window size");
+}
+
+void handleSigWinCh(int unused __attribute__((unused))) {
+    updateWindowSize();
+    if (E.cy >= E.screenrows) E.cy = E.screenrows - 1;
+    if (E.cx >= E.screencols) E.cx = E.screencols - 1;
+    if (E.rowoff + E.cy >= E.numrows) {
+        E.rowoff = E.numrows - E.cy - 1;
+        if (E.rowoff < 0) E.rowoff = 0;
+    }
+    editorRefreshScreen();
+}
+
 /*** init ***/
-void initEditor() {
-    E.cx = 0;
-    E.cy = 0;
-    E.rx = 0;
+void initEditor(void) {
+    E.cx    = 0;
+    E.cy    = 0;
+    E.rx    = 0;
     E.rowoff = 0;
     E.coloff = 0;
     E.numrows = 0;
-    E.row = NULL;
-    E.dirty = 0;
-    E.filename = NULL;
-    E.statusmsg[0] = '\0';
+    E.row   = NULL;
+    E.dirty = 0;git
+    E.rawmode   = 0;
+    E.paste_mode = 0;
+    E.last_key  = 0;
+    E.filename  = NULL;
+    E.statusmsg[0]   = '\0';
     E.statusmsg_time = 0;
-    E.syntax = NULL;
+    E.syntax    = NULL;
+    E.last_char_time.tv_sec  = 0;
+    E.last_char_time.tv_usec = 0;
 
-    if (getWindowSize(&E.screenrows, &E.screencols) == -1) die ("getWindowSize");
-    E.screenrows -= 2;
+    updateWindowSize();
+    signal(SIGWINCH, handleSigWinCh);
 }
 
 int main(int argc, char *argv[]) {
-    enableRawMode();
-    initEditor();
-    if (argc >= 2) {
-        editorOpen(argv[1]);
+    if (argc < 2) {
+        fprintf(stderr, "Usage: filo <filename>\n");
+        exit(1);
     }
 
-    editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
+    initEditor();
+    editorOpen(argv[1]);
+    enableRawMode();
+    editorSetStatusMessage(
+        "HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find | Ctrl-H = delete line");
 
-    while (1)
-    {
+    while (1) {
         editorRefreshScreen();
         editorProcessKeypress();
     }
